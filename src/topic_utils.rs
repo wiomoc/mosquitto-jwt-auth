@@ -30,7 +30,7 @@ pub fn parse_topic_path(
             let element = parse_topic_path_element(substring, may_contain_wildcard)?;
 
             if element == TopicPathElement::WildcardMultiLevel {
-                return Err(TopicPathError::TopicAfterMultiLevelWildcard)
+                return Err(TopicPathError::TopicAfterMultiLevelWildcard);
             }
             path.0.push(element);
         }
@@ -46,12 +46,12 @@ pub fn parse_topic_path(
 
 fn parse_topic_path_element(
     substring: &str,
-    is_topic: bool,
+    may_contain_wildcard: bool,
 ) -> Result<TopicPathElement, TopicPathError> {
-    match (substring.chars().nth(0).unwrap(), is_topic) {
-        ('#', false) => Ok(TopicPathElement::WildcardMultiLevel),
-        ('+', false) => Ok(TopicPathElement::WildcardSingleLevel),
-        ('#', true) | ('+', true) => Err(TopicPathError::WildcardInTopic),
+    match (substring.chars().nth(0).unwrap(), may_contain_wildcard) {
+        ('#', true) => Ok(TopicPathElement::WildcardMultiLevel),
+        ('+', true) => Ok(TopicPathElement::WildcardSingleLevel),
+        ('#', false) | ('+', false) => Err(TopicPathError::WildcardInTopic),
         (_, _) => {
             if substring.contains(|c| c == '+' || c == '#') {
                 Err(TopicPathError::InvalidTopicName(substring.to_string()))
@@ -102,12 +102,17 @@ mod tests {
                 Topic("123/".to_string()),
                 WildcardMultiLevel
             ]),
-            parse_topic_path("/+/abc/123/#", false).unwrap()
+            parse_topic_path("/+/abc/123/#", true).unwrap()
         );
 
         assert_eq!(
             TopicPath(vec![WildcardMultiLevel]),
-            parse_topic_path("#", false).unwrap()
+            parse_topic_path("#", true).unwrap()
+        );
+
+        assert_eq!(
+            TopicPath(vec![Topic("/".to_string()), Topic("123".to_string())]),
+            parse_topic_path("/123", false).unwrap()
         );
     }
 

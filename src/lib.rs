@@ -13,6 +13,7 @@ use std::str::FromStr;
 pub mod mosquitto_sys;
 mod topic_utils;
 
+#[derive(PartialEq, Debug)]
 struct MosquittoJWTAuthPluginConfig {
     secret: Vec<u8>,
     validation: Validation,
@@ -41,17 +42,19 @@ impl MosquittoJWTAuthPluginConfig {
         let secret = secret.ok_or("jwt_sec_env or jwt_sec_base64 missing")?;
 
         let validate_exp = if let Some(opt) = opts.get("jwt_validate_exp") {
-            opt.parse::<bool>().map_err(|_| "'auth_opt_jwt_validate_exp' is not a boolean")?
+            opt.parse::<bool>()
+                .map_err(|_| "'auth_opt_jwt_validate_exp' is not a boolean")?
         } else {
             true
         };
 
-        let validate_sub_match_username = if let Some(opt) = opts.get("validate_sub_match_username")
-        {
-            opt.parse::<bool>().map_err(|_| "'auth_opt_validate_sub_match_username' is not a boolean")?
-        } else {
-            true
-        };
+        let validate_sub_match_username =
+            if let Some(opt) = opts.get("jwt_validate_sub_match_username") {
+                opt.parse::<bool>()
+                    .map_err(|_| "'auth_opt_jwt_validate_sub_match_username' is not a boolean")?
+            } else {
+                true
+            };
 
         let validation = Validation {
             leeway: 0,
@@ -76,6 +79,7 @@ pub(crate) struct MosquittoJWTAuthPluginInstance {
     clients: HashMap<ClientID, UserPermissions>,
 }
 
+#[derive(PartialEq, Debug)]
 struct UserPermissions {
     r#pub: Vec<TopicPath>,
     sub: Vec<TopicPath>,
@@ -87,7 +91,7 @@ impl UserPermissions {
             filter
                 .iter()
                 .map(|filter| {
-                    topic_utils::parse_topic_path(filter, false).map_err(|err| format!("{:?}", err))
+                    topic_utils::parse_topic_path(filter, true).map_err(|err| format!("{:?}", err))
                 })
                 .collect()
         } else {
@@ -213,5 +217,296 @@ impl MosquittoJWTAuthPluginInstance {
         } else {
             Err(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_config_from_opts_empty_opts() {
+        let opts = HashMap::new();
+
+        let result = MosquittoJWTAuthPluginConfig::from_opts(opts);
+
+        assert_eq!(result.err().unwrap(), "'auth_opt_jwt_alg' is missing");
+    }
+
+    #[test]
+    fn test_config_from_opts_unknown_algorithm() {
+        let mut opts = HashMap::new();
+        opts.insert("jwt_alg", "HS344");
+
+        let result = MosquittoJWTAuthPluginConfig::from_opts(opts);
+
+        assert_eq!(
+            result.err().unwrap(),
+            "'auth_opt_jwt_alg' is not a valid jwt alg"
+        );
+    }
+
+    #[test]
+    fn test_config_from_opts_sec_missing() {
+        let mut opts = HashMap::new();
+        opts.insert("jwt_alg", "HS256");
+
+        let result = MosquittoJWTAuthPluginConfig::from_opts(opts);
+
+        assert_eq!(
+            result.err().unwrap(),
+            "jwt_sec_env or jwt_sec_base64 missing"
+        );
+    }
+
+    #[test]
+    fn test_config_from_opts_sec_env_invalid_base64() {
+        let mut opts = HashMap::new();
+        opts.insert("jwt_alg", "HS256");
+        opts.insert("jwt_sec_env", "jwt_sec_env");
+
+        env::set_var("jwt_sec_env", "))");
+
+        let result = MosquittoJWTAuthPluginConfig::from_opts(opts);
+        env::remove_var("jwt_sec_env");
+
+        assert_eq!(result.err().unwrap(), "invalid base64");
+    }
+
+    #[test]
+    fn test_config_from_opts_env_valid_base64() {
+        env::set_var("jwt_sec_env", "AABB");
+
+        let mut opts = HashMap::new();
+        opts.insert("jwt_alg", "RS256");
+        opts.insert("jwt_sec_env", "jwt_sec_env");
+
+        let result = MosquittoJWTAuthPluginConfig::from_opts(opts);
+
+        assert_eq!(
+            result.ok().unwrap(),
+            MosquittoJWTAuthPluginConfig {
+                secret: vec![0, 0, 0x41],
+                validate_sub_match_username: true,
+                validation: Validation {
+                    leeway: 0,
+                    validate_exp: true,
+                    validate_nbf: false,
+                    aud: None,
+                    iss: None,
+                    sub: None,
+                    algorithms: vec![Algorithm::RS256],
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn test_config_from_opts_sec_env_fallback() {
+        env::remove_var("jwt_sec_env");
+
+        let mut opts = HashMap::new();
+        opts.insert("jwt_alg", "HS256");
+        opts.insert("jwt_sec_env", "jwt_sec_env");
+        opts.insert("jwt_sec_base64", "AABB");
+
+        let result = MosquittoJWTAuthPluginConfig::from_opts(opts);
+
+        assert_eq!(result.is_ok(), true);
+    }
+
+    #[test]
+    fn test_config_from_opts_sec_invalid_base64() {
+        env::remove_var("jwt_sec_env");
+
+        let mut opts = HashMap::new();
+        opts.insert("jwt_alg", "HS256");
+        opts.insert("jwt_sec_base64", "AAB(");
+
+        let result = MosquittoJWTAuthPluginConfig::from_opts(opts);
+
+        assert_eq!(result.err().unwrap(), "invalid base64");
+    }
+
+    #[test]
+    fn test_config_from_opts_valid_base64() {
+        env::remove_var("jwt_sec_env");
+
+        let mut opts = HashMap::new();
+        opts.insert("jwt_alg", "RS256");
+        opts.insert("jwt_sec_base64", "AABB");
+
+        let result = MosquittoJWTAuthPluginConfig::from_opts(opts);
+
+        assert_eq!(
+            result.ok().unwrap(),
+            MosquittoJWTAuthPluginConfig {
+                secret: vec![0, 0, 0x41],
+                validate_sub_match_username: true,
+                validation: Validation {
+                    leeway: 0,
+                    validate_exp: true,
+                    validate_nbf: false,
+                    aud: None,
+                    iss: None,
+                    sub: None,
+                    algorithms: vec![Algorithm::RS256],
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn test_config_from_opts_validate_exp_false() {
+        env::remove_var("jwt_sec_env");
+
+        let mut opts = HashMap::new();
+        opts.insert("jwt_alg", "RS256");
+        opts.insert("jwt_sec_base64", "AABB");
+        opts.insert("jwt_validate_exp", "false");
+
+        let result = MosquittoJWTAuthPluginConfig::from_opts(opts);
+
+        assert_eq!(
+            result.ok().unwrap(),
+            MosquittoJWTAuthPluginConfig {
+                secret: vec![0, 0, 0x41],
+                validate_sub_match_username: true,
+                validation: Validation {
+                    leeway: 0,
+                    validate_exp: false,
+                    validate_nbf: false,
+                    aud: None,
+                    iss: None,
+                    sub: None,
+                    algorithms: vec![Algorithm::RS256],
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn test_config_from_opts_validate_exp_not_a_boolean() {
+        env::remove_var("jwt_sec_env");
+
+        let mut opts = HashMap::new();
+        opts.insert("jwt_alg", "RS256");
+        opts.insert("jwt_sec_base64", "AABB");
+        opts.insert("jwt_validate_exp", "sdfsdf");
+
+        let result = MosquittoJWTAuthPluginConfig::from_opts(opts);
+
+        assert_eq!(
+            result.err().unwrap(),
+            "'auth_opt_jwt_validate_exp' is not a boolean"
+        );
+    }
+
+    #[test]
+    fn test_config_from_opts_validate_sub_match_username_false() {
+        env::remove_var("jwt_sec_env");
+
+        let mut opts = HashMap::new();
+        opts.insert("jwt_alg", "RS256");
+        opts.insert("jwt_sec_base64", "AABB");
+        opts.insert("jwt_validate_sub_match_username", "false");
+
+        let result = MosquittoJWTAuthPluginConfig::from_opts(opts);
+
+        assert_eq!(
+            result.ok().unwrap(),
+            MosquittoJWTAuthPluginConfig {
+                secret: vec![0, 0, 0x41],
+                validate_sub_match_username: false,
+                validation: Validation {
+                    leeway: 0,
+                    validate_exp: true,
+                    validate_nbf: false,
+                    aud: None,
+                    iss: None,
+                    sub: None,
+                    algorithms: vec![Algorithm::RS256],
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn test_config_from_opts_validate_sub_match_username_not_a_boolean() {
+        env::remove_var("jwt_sec_env");
+
+        let mut opts = HashMap::new();
+        opts.insert("jwt_alg", "RS256");
+        opts.insert("jwt_sec_base64", "AABB");
+        opts.insert("jwt_validate_sub_match_username", "sdfsdf");
+
+        let result = MosquittoJWTAuthPluginConfig::from_opts(opts);
+
+        assert_eq!(
+            result.err().unwrap(),
+            "'auth_opt_jwt_validate_sub_match_username' is not a boolean"
+        );
+    }
+
+    #[test]
+    fn test_user_permissions_from_claims() {
+        let claims = Claims {
+            sub: None,
+            publ: None,
+            subs: Some(vec!["#".to_string(), "/123/55".to_string()]),
+        };
+
+        let result = UserPermissions::from_claims(claims);
+
+        assert_eq!(
+            result.ok().unwrap(),
+            UserPermissions {
+                r#pub: Vec::new(),
+                sub: vec![
+                    topic_utils::parse_topic_path("#", true).unwrap(),
+                    topic_utils::parse_topic_path("/123/55", true).unwrap()
+                ],
+            }
+        )
+    }
+
+    #[test]
+    fn test_user_permissions_may_subscribe() {
+        let permissions = UserPermissions {
+            r#pub: Vec::new(),
+            sub: vec![
+                topic_utils::parse_topic_path("/123/55", true).unwrap(),
+                topic_utils::parse_topic_path("/+/23", true).unwrap(),
+            ],
+        };
+
+        let result = permissions.may_subscribe("/123");
+        assert_eq!(result, false);
+
+        let result = permissions.may_subscribe("/123/23");
+        assert_eq!(result, true);
+
+        let result = permissions.may_subscribe("/12#3/23");
+        assert_eq!(result, false)
+    }
+
+    #[test]
+    fn test_user_permissions_may_publish() {
+        let permissions = UserPermissions {
+            sub: Vec::new(),
+            r#pub: vec![
+                topic_utils::parse_topic_path("/123/55", true).unwrap(),
+                topic_utils::parse_topic_path("/+/23", true).unwrap(),
+            ],
+        };
+
+        let result = permissions.may_publish("/123");
+        assert_eq!(result, false);
+
+        let result = permissions.may_publish("/123/23");
+        assert_eq!(result, true);
+
+        let result = permissions.may_publish("/12#3/23");
+        assert_eq!(result, false)
     }
 }
