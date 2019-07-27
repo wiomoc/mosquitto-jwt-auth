@@ -1,4 +1,8 @@
 # mosquitto-jwt-auth
+
+[![Build Status](https://travis-ci.org/wiomoc/mosquitto-jwt-auth.svg?branch=master)](https://travis-ci.org/wiomoc/mosquitto-jwt-auth)
+[![Coverage Status](https://coveralls.io/repos/github/wiomoc/mosquitto-jwt-auth/badge.svg)](https://coveralls.io/github/wiomoc/mosquitto-jwt-auth)
+
 Simple Plugin for Mosquitto which enables authentication and authorisation via JWT as MQTT password.
 
 ## Configuration
@@ -17,10 +21,10 @@ Simple Plugin for Mosquitto which enables authentication and authorisation via J
 * `subl` _(Optional)_ Contains the Topics(filters) the client is allowed to subscribe to
 
 
-      {
-        "sub": "mqttUser",
-        "iat": 1516239022,
-        "exp": 1616239022,
-        "subs": ["/+/topic", "/abc/#"],
-        "publ": ["/abc"]
-      }
+     {
+       "sub": "mqttUser",
+       "iat": 1516239022,
+       "exp": 1616239022,
+       "subs": ["/+/topic", "/abc/#"],
+       "publ": ["/abc"]
+     }
