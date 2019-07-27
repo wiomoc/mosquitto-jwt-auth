@@ -76,16 +76,16 @@ impl MosquittoJWTAuthPluginConfig {
 
 pub(crate) struct MosquittoJWTAuthPluginInstance {
     config: Option<MosquittoJWTAuthPluginConfig>,
-    clients: HashMap<ClientID, UserPermissions>,
+    client_permissions: HashMap<ClientID, Permissions>,
 }
 
 #[derive(PartialEq, Debug)]
-struct UserPermissions {
+struct Permissions {
     r#pub: Vec<TopicPath>,
     sub: Vec<TopicPath>,
 }
 
-impl UserPermissions {
+impl Permissions {
     fn read_filter_claim(filter: Option<Vec<String>>) -> Result<Vec<TopicPath>, String> {
         if let Some(filter) = filter {
             filter
@@ -99,10 +99,10 @@ impl UserPermissions {
         }
     }
 
-    fn from_claims(claims: Claims) -> Result<UserPermissions, String> {
-        Ok(UserPermissions {
-            r#pub: UserPermissions::read_filter_claim(claims.publ)?,
-            sub: UserPermissions::read_filter_claim(claims.subs)?,
+    fn from_claims(claims: Claims) -> Result<Permissions, String> {
+        Ok(Permissions {
+            r#pub: Permissions::read_filter_claim(claims.publ)?,
+            sub: Permissions::read_filter_claim(claims.subs)?,
         })
     }
 
@@ -138,7 +138,7 @@ impl MosquittoJWTAuthPluginInstance {
     pub(crate) fn new() -> MosquittoJWTAuthPluginInstance {
         MosquittoJWTAuthPluginInstance {
             config: None,
-            clients: HashMap::new(),
+            client_permissions: HashMap::new(),
         }
     }
 
@@ -170,7 +170,7 @@ impl MosquittoJWTAuthPluginInstance {
             .map_err(|err| format!("{:?}", err))
             .map(|token_data| token_data.claims)
             .and_then(|claims| {
-                if claims.sub.is_none() && !config.validate_sub_match_username {
+                if !config.validate_sub_match_username {
                     Ok(claims)
                 } else if let Some(ref sub) = claims.sub {
                     if sub.as_str() == username {
@@ -185,11 +185,11 @@ impl MosquittoJWTAuthPluginInstance {
                     Err("claim 'sub' is missing".to_string())
                 }
             })
-            .and_then(UserPermissions::from_claims);
+            .and_then(Permissions::from_claims);
 
         match permissions {
             Ok(permissions) => {
-                self.clients.insert(client_id, permissions);
+                self.client_permissions.insert(client_id, permissions);
                 Ok(())
             }
             Err(err) => {
@@ -205,11 +205,11 @@ impl MosquittoJWTAuthPluginInstance {
         acl_type: AclType,
         topic: &str,
     ) -> Result<(), ()> {
-        let user_permissions = self.clients.get(&client_id).ok_or(())?;
+        let permissions = self.client_permissions.get(&client_id).ok_or(())?;
 
         let action_allowed = match acl_type {
-            AclType::Publish => user_permissions.may_publish(topic),
-            AclType::Subscribe => user_permissions.may_subscribe(topic),
+            AclType::Publish => permissions.may_publish(topic),
+            AclType::Subscribe => permissions.may_subscribe(topic),
         };
 
         if action_allowed {
@@ -449,18 +449,18 @@ mod tests {
     }
 
     #[test]
-    fn test_user_permissions_from_claims() {
+    fn test_permissions_from_claims() {
         let claims = Claims {
             sub: None,
             publ: None,
             subs: Some(vec!["#".to_string(), "/123/55".to_string()]),
         };
 
-        let result = UserPermissions::from_claims(claims);
+        let result = Permissions::from_claims(claims);
 
         assert_eq!(
             result.ok().unwrap(),
-            UserPermissions {
+            Permissions {
                 r#pub: Vec::new(),
                 sub: vec![
                     topic_utils::parse_topic_path("#", true).unwrap(),
@@ -471,8 +471,8 @@ mod tests {
     }
 
     #[test]
-    fn test_user_permissions_may_subscribe() {
-        let permissions = UserPermissions {
+    fn test_permissions_may_subscribe() {
+        let permissions = Permissions {
             r#pub: Vec::new(),
             sub: vec![
                 topic_utils::parse_topic_path("/123/55", true).unwrap(),
@@ -491,8 +491,8 @@ mod tests {
     }
 
     #[test]
-    fn test_user_permissions_may_publish() {
-        let permissions = UserPermissions {
+    fn test_permissions_may_publish() {
+        let permissions = Permissions {
             sub: Vec::new(),
             r#pub: vec![
                 topic_utils::parse_topic_path("/123/55", true).unwrap(),
@@ -508,5 +508,170 @@ mod tests {
 
         let result = permissions.may_publish("/12#3/23");
         assert_eq!(result, false)
+    }
+
+    #[test]
+    fn test_authenticate_user_signature_missmatch() {
+        let mut instance = MosquittoJWTAuthPluginInstance::new();
+        instance.config = Some(MosquittoJWTAuthPluginConfig {
+            validation: Validation::default(),
+            validate_sub_match_username: true,
+            secret: base64::decode("XmThTwNsoLBlbk3cbOi5r2g1EIJNT7o7zSKc9tMUsIg").unwrap(),
+        });
+
+        let client_id = 33 as ClientID;
+
+        let result = instance.authenticate_user(client_id, "user", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJuYW1lIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SLwblB5xA5hytO2CCDI49iI50SuseVYInhdtXMhzN4s");
+
+        assert_eq!(result.is_err(), true);
+        assert_eq!(instance.client_permissions.contains_key(&client_id), false);
+    }
+
+    #[test]
+    fn test_authenticate_user_sub_username_missmatch() {
+        let mut instance = MosquittoJWTAuthPluginInstance::new();
+        instance.config = Some(MosquittoJWTAuthPluginConfig {
+            validation: Validation {
+                validate_exp: false,
+                ..Validation::default()
+            },
+            validate_sub_match_username: true,
+            secret: base64::decode("XmThTwNsoLBlbk3cbOi5r2g1EIJNT7o7zSKy9tMUsIg").unwrap(),
+        });
+
+        let client_id = 33 as ClientID;
+
+        let result = instance.authenticate_user(client_id, "user", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJuYW1lIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SLwblB5xA5hytO2CCDI49iI50SuseVYInhdtXMhzN4s");
+
+        assert_eq!(result.is_err(), true);
+        assert_eq!(instance.client_permissions.contains_key(&client_id), false);
+    }
+
+    #[test]
+    fn test_authenticate_user_invalid_sub_missing() {
+        let mut instance = MosquittoJWTAuthPluginInstance::new();
+        instance.config = Some(MosquittoJWTAuthPluginConfig {
+            validation: Validation {
+                validate_exp: false,
+                ..Validation::default()
+            },
+            validate_sub_match_username: true,
+            secret: base64::decode("XmThTwNsoLBlbk3cbOi5r2g1EIJNT7o7zSKy9tMUsIg").unwrap(),
+        });
+
+        let client_id = 33 as ClientID;
+
+        let result = instance.authenticate_user(client_id, "user", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJuYW1lIjoiSm9obiBEb2UiLCJpYXQiOjE1MTYyMzkwMjJ9.aelYzUN2movT8bG3flOX3aNWZ8kS2ijQPVUUbhA7TW0");
+
+        assert_eq!(result.is_err(), true);
+        assert_eq!(instance.client_permissions.contains_key(&client_id), false);
+    }
+
+    #[test]
+    fn test_authenticate_user_sub_valid_missing() {
+        let mut instance = MosquittoJWTAuthPluginInstance::new();
+        instance.config = Some(MosquittoJWTAuthPluginConfig {
+            validation: Validation {
+                validate_exp: false,
+                ..Validation::default()
+            },
+            validate_sub_match_username: false,
+            secret: base64::decode("XmThTwNsoLBlbk3cbOi5r2g1EIJNT7o7zSKy9tMUsIg").unwrap(),
+        });
+
+        let client_id = 33 as ClientID;
+
+        let result = instance.authenticate_user(client_id, "user", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJuYW1lIjoiSm9obiBEb2UiLCJpYXQiOjE1MTYyMzkwMjJ9.aelYzUN2movT8bG3flOX3aNWZ8kS2ijQPVUUbhA7TW0");
+
+        assert_eq!(result.is_ok(), true);
+        assert_eq!(
+            instance.client_permissions.get(&client_id).unwrap(),
+            &Permissions {
+                sub: Vec::new(),
+                r#pub: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_authenticate_user_sub_matching() {
+        let mut instance = MosquittoJWTAuthPluginInstance::new();
+        instance.config = Some(MosquittoJWTAuthPluginConfig {
+            validation: Validation {
+                validate_exp: false,
+                ..Validation::default()
+            },
+            validate_sub_match_username: false,
+            secret: base64::decode("XmThTwNsoLBlbk3cbOi5r2g1EIJNT7o7zSKy9tMUsIg").unwrap(),
+        });
+
+        let client_id = 33 as ClientID;
+
+        let result = instance.authenticate_user(client_id, "name", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJuYW1lIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SLwblB5xA5hytO2CCDI49iI50SuseVYInhdtXMhzN4s");
+
+        assert_eq!(result.is_ok(), true);
+        assert_eq!(
+            instance.client_permissions.get(&client_id).unwrap(),
+            &Permissions {
+                sub: Vec::new(),
+                r#pub: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_acl_check() {
+        let mut instance = MosquittoJWTAuthPluginInstance::new();
+        instance.config = Some(MosquittoJWTAuthPluginConfig {
+            validation: Validation::default(),
+            validate_sub_match_username: true,
+            secret: Vec::new(),
+        });
+
+        let client_id0 = 33 as ClientID;
+        let client_id1 = 36 as ClientID;
+
+        instance.client_permissions.insert(
+            client_id0,
+            Permissions {
+                sub: Vec::new(),
+                r#pub: vec![
+                    topic_utils::parse_topic_path("/123/55", true).unwrap(),
+                    topic_utils::parse_topic_path("/+/23", true).unwrap(),
+                ],
+            },
+        );
+
+        instance.client_permissions.insert(
+            client_id1,
+            Permissions {
+                r#pub: Vec::new(),
+                sub: vec![
+                    topic_utils::parse_topic_path("/123/55", true).unwrap(),
+                    topic_utils::parse_topic_path("/+/23", true).unwrap(),
+                ],
+            },
+        );
+
+        let result = instance.acl_check(client_id0, AclType::Publish, "/11");
+        assert_eq!(result, Err(()));
+
+        let result = instance.acl_check(client_id0, AclType::Publish, "/123/55");
+        assert_eq!(result, Ok(()));
+
+        let result = instance.acl_check(client_id0, AclType::Subscribe, "/123/55");
+        assert_eq!(result, Err(()));
+
+        let result = instance.acl_check(client_id1, AclType::Subscribe, "/11");
+        assert_eq!(result, Err(()));
+
+        let result = instance.acl_check(client_id1, AclType::Subscribe, "/123/55");
+        assert_eq!(result, Ok(()));
+
+        let result = instance.acl_check(client_id1, AclType::Publish, "/123/55");
+        assert_eq!(result, Err(()));
+
+        let result = instance.acl_check(0 as ClientID, AclType::Publish, "/123/55");
+        assert_eq!(result, Err(()));
     }
 }
