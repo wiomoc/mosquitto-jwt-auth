@@ -3,6 +3,9 @@ name = "mosquitto-jwt-auth"
 version = "0.1.0"
 authors = ["Christoph Walcher <christoph-wa@gmx.de>"]
 edition = "2018"
+[badges]
+travis-ci = { repository = "wiomoc/mosquitto-jwt-auth" }
+coveralls = { repository = "wiomoc/mosquitto-jwt-auth" }
 
 [lib]
 crate-type=["dylib"]
