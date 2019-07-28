@@ -231,14 +231,8 @@ mod tests {
 
         assert_eq!(
             match_topic_to_topic_filter(
-                &TopicPath(vec![
-                    Topic("/".to_string()),
-                    WildcardSingleLevel,
-                ]),
-                &TopicPath(vec![
-                    Topic("/".to_string()),
-                    WildcardMultiLevel,
-                ])
+                &TopicPath(vec![Topic("/".to_string()), WildcardSingleLevel,]),
+                &TopicPath(vec![Topic("/".to_string()), WildcardMultiLevel,])
             ),
             false
         );

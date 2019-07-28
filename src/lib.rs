@@ -8,6 +8,8 @@ use crate::topic_utils::TopicPath;
 use jsonwebtoken::{Algorithm, Validation};
 use std::collections::HashMap;
 use std::env;
+use std::fs::File;
+use std::io::Read;
 use std::str::FromStr;
 
 pub mod mosquitto_sys;
@@ -25,21 +27,26 @@ impl MosquittoJWTAuthPluginConfig {
         let alg = Algorithm::from_str(opts.get("jwt_alg").ok_or("'auth_opt_jwt_alg' is missing")?)
             .map_err(|_| "'auth_opt_jwt_alg' is not a valid jwt alg")?;
 
-        let mut secret = None;
+        let secret = if let Some(secret_file_opt) = opts.get("jwt_sec_file") {
+            let mut file_contents = Vec::new();
 
-        if let Some(secret_env_opt) = opts.get("jwt_sec_env") {
+            File::open(secret_file_opt)
+                .map_err(|_| "couldn't open secret file")?
+                .read_to_end(&mut file_contents)
+                .map_err(|_| "couldn't read secret file")?;
+
+            file_contents
+        } else if let Some(secret_env_opt) = opts.get("jwt_sec_env") {
             if let Ok(secret_base64) = env::var(secret_env_opt) {
-                secret = Some(base64::decode(&secret_base64).map_err(|_| "invalid base64")?);
+                base64::decode(&secret_base64).map_err(|_| "invalid base64")?
+            } else {
+                return Err("environment variable not set");
             }
-        }
-
-        if let Some(secret_opt) = opts.get("jwt_sec_base64") {
-            if secret.is_none() {
-                secret = Some(base64::decode(secret_opt).map_err(|_| "invalid base64")?);
-            }
-        }
-
-        let secret = secret.ok_or("jwt_sec_env or jwt_sec_base64 missing")?;
+        } else if let Some(secret_opt) = opts.get("jwt_sec_base64") {
+            base64::decode(secret_opt).map_err(|_| "invalid base64")?
+        } else {
+            return Err("jwt_sec_file, jwt_sec_env or jwt_sec_base64 missing");
+        };
 
         let validate_exp = if let Some(opt) = opts.get("jwt_validate_exp") {
             opt.parse::<bool>()
@@ -255,8 +262,31 @@ mod tests {
 
         assert_eq!(
             result.err().unwrap(),
-            "jwt_sec_env or jwt_sec_base64 missing"
+            "jwt_sec_file, jwt_sec_env or jwt_sec_base64 missing"
         );
+    }
+
+    #[test]
+    fn test_config_from_opts_sec_file_valid() {
+        let mut opts = HashMap::new();
+        opts.insert("jwt_alg", "RS256");
+        opts.insert("jwt_sec_file", "tests/public.der");
+
+        let result = MosquittoJWTAuthPluginConfig::from_opts(opts);
+
+        assert!(result.ok().unwrap().secret.starts_with(b"\x30\x82\x01\x22\x30\x0d\x06\x09"));
+    }
+
+
+    #[test]
+    fn test_config_from_opts_sec_file_not_found() {
+        let mut opts = HashMap::new();
+        opts.insert("jwt_alg", "RS256");
+        opts.insert("jwt_sec_file", "tests/publicsfd.der");
+
+        let result = MosquittoJWTAuthPluginConfig::from_opts(opts);
+
+        assert_eq!(result.err().unwrap(), "couldn't open secret file");
     }
 
     #[test]
@@ -302,17 +332,16 @@ mod tests {
     }
 
     #[test]
-    fn test_config_from_opts_sec_env_fallback() {
+    fn test_config_from_opts_sec_env_not_set() {
         env::remove_var("jwt_sec_env");
 
         let mut opts = HashMap::new();
         opts.insert("jwt_alg", "HS256");
         opts.insert("jwt_sec_env", "jwt_sec_env");
-        opts.insert("jwt_sec_base64", "AABB");
 
         let result = MosquittoJWTAuthPluginConfig::from_opts(opts);
 
-        assert_eq!(result.is_ok(), true);
+        assert_eq!(result.err().unwrap(), "environment variable not set");
     }
 
     #[test]

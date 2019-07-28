@@ -59,6 +59,7 @@ pub extern "C" fn mosquitto_auth_plugin_version() -> c_int {
 }
 
 #[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn mosquitto_auth_plugin_init(
     user_data: *mut *mut c_void,
     _opts: *mut mosquitto_opt,
@@ -74,6 +75,7 @@ pub extern "C" fn mosquitto_auth_plugin_init(
 }
 
 #[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn mosquitto_auth_plugin_cleanup(
     user_data: *mut c_void,
     _opts: *mut mosquitto_opt,
@@ -87,6 +89,7 @@ pub extern "C" fn mosquitto_auth_plugin_cleanup(
 }
 
 #[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn mosquitto_auth_security_init(
     user_data: *mut c_void,
     opts: *mut mosquitto_opt,
@@ -125,6 +128,7 @@ pub extern "C" fn mosquitto_auth_security_cleanup(
 }
 
 #[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn mosquitto_auth_acl_check(
     user_data: *mut c_void,
     access: c_int,
@@ -152,6 +156,7 @@ pub extern "C" fn mosquitto_auth_acl_check(
 }
 
 #[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn mosquitto_auth_unpwd_check(
     user_data: *mut c_void,
     client: *mut mosquitto,

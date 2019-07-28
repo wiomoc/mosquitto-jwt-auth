@@ -19,13 +19,11 @@ env:
   - RUST_TEST_THREADS=1
 
 before_install:
-    - wget http://ftp.nz.debian.org/debian/pool/main/libw/libwebsockets/libwebsockets3_1.2.2-1_amd64.deb
-    - sudo dpkg -i libwebsockets3_1.2.2-1_amd64.deb
-    - sudo apt install -y mosquitto
-script:
-  - cargo build --verbose
-  - cargo test --verbose
-  - cargo build --release --verbose
+  - wget http://ftp.nz.debian.org/debian/pool/main/libw/libwebsockets/libwebsockets3_1.2.2-1_amd64.deb
+  - sudo dpkg -i libwebsockets3_1.2.2-1_amd64.deb
+  - rm libwebsockets3_1.2.2-1_amd64.deb
+  - sudo apt install -y mosquitto mosquitto-clients
+
 after_success: |
   cargo install cargo-kcov &&
   mkdir kcov &&
@@ -35,11 +33,17 @@ after_success: |
   rm -rf kcov &&
   cargo kcov --all -v --coveralls --no-clean-rebuild &&
   echo "Uploaded code coverage"
+
+before_deploy:
+  - cp target/debug/libmosquitto_jwt_auth.so libmosquitto_jwt_auth.so
 deploy:
   provider: releases
   api_key:
     secure: MsOQjpV5QdqOUqG8qJOPJ8IZ5wXARq9y0SDHbqVX2W13vJx3n1sYkbFYTQcuionL5HtMve62AsE+TrRbaUSUob9aytqjOU8eFH095aqpG6ZZh+CzDOnuirVs0WPIizU9zHtzAQT7YcbN59hvivJwnZ03w7SWS129zuoY3VNiOCAgq0h8jmUH/weFc+CuiohhCPXhvTOTuOIemMbnS6r1CTq2hzpj0mdrXRMEwInBpTV8vhOR3TLruIWObHHijW6wnCt0ROobDWq+MaY+3tv3jsdTLJKH++U00c1h3XIznFIyb6GZM2MHkjMsOebHnMnkHqj7Sgi8sbvXsdVazCD/mH4QVrjRuOxuYpWJ700hUnezahuK4uRk62rRr/oc383CBJri2fuXv2V8SY9rPgQAmn0VwSEk7Sys7jmlQ59Y8SYrwMpgFpJjxqrNMU9jOYnSU7O+9IjoD5z5GC8wTRtw+jyzXjm7FcU+/W0fT0yCYdbYGPCs0epc8jB/Na+A14M/y8AcFR86DvOjsv5ko1hWw/yROPR9Y9N/f6unVgCgf90osxLFP6NE8KxSC+CZI2ZAbtll3iwxuPfZxRYanT7g+MgqWnwRJhzrlb/W40NSEX5XT+8+mq1E5aD/O0FBLi54NDK/GuUelaL99S1YPxCcmFvSnXoRZ+dehhHckluPktE=
-  file: target/release/libmosquitto_jwt_auth.so
+  file:
+    - libmosquitto_jwt_auth.so
   on:
     repo: wiomoc/mosquitto-jwt-auth
     tags: true
+after_deploy:
+  - rm libmosquitto_jwt_auth.so
