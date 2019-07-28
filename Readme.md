@@ -21,10 +21,10 @@ Simple Plugin for Mosquitto which enables authentication and authorisation via J
 * `subl` _(Optional)_ Contains the Topics(filters) the client is allowed to subscribe to
 
 
-     {
-       "sub": "mqttUser",
-       "iat": 1516239022,
-       "exp": 1616239022,
-       "subs": ["/+/topic", "/abc/#"],
-       "publ": ["/abc"]
-     }
+      {
+        "sub": "mqttUser",
+        "iat": 1516239022,
+        "exp": 1616239022,
+        "subs": ["/+/topic", "/abc/#"],
+        "publ": ["/abc"]
+      }

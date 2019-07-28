@@ -134,6 +134,12 @@ mod tests {
         parse_topic_path("abc/ab#cd", false).unwrap();
     }
 
+    #[should_panic]
+    #[test]
+    fn test_parse_topic_path_invalid_topic_after_multilevel_wildcard() {
+        parse_topic_path("abc/ab/#/cd", true).unwrap();
+    }
+
     #[test]
     fn test_match_topic_topic() {
         assert_eq!(
@@ -218,6 +224,20 @@ mod tests {
                     Topic("123/".to_string()),
                     Topic("890".to_string()),
                     Topic("890".to_string())
+                ])
+            ),
+            false
+        );
+
+        assert_eq!(
+            match_topic_to_topic_filter(
+                &TopicPath(vec![
+                    Topic("/".to_string()),
+                    WildcardSingleLevel,
+                ]),
+                &TopicPath(vec![
+                    Topic("/".to_string()),
+                    WildcardMultiLevel,
                 ])
             ),
             false

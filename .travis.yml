@@ -26,5 +26,5 @@ after_success: |
   cargo kcov --print-install-kcov-sh | sh &&
   cd ${TRAVIS_BUILD_DIR} &&
   rm -rf kcov &&
-  cargo kcov --all --coveralls &&
+  cargo kcov --all -v --coveralls &&
   echo "Uploaded code coverage"

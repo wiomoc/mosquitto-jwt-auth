@@ -511,7 +511,51 @@ mod tests {
     }
 
     #[test]
-    fn test_authenticate_user_signature_missmatch() {
+    fn test_setup_valid() {
+        env::remove_var("jwt_sec_env");
+
+        let mut opts = HashMap::new();
+        opts.insert("jwt_alg", "RS256");
+        opts.insert("jwt_sec_base64", "AABB");
+
+        let mut instance = MosquittoJWTAuthPluginInstance::new();
+        let result = instance.setup(opts);
+
+        assert_eq!(result.is_ok(), true);
+        assert_eq!(
+            instance.config.unwrap(),
+            MosquittoJWTAuthPluginConfig {
+                secret: vec![0, 0, 0x41],
+                validate_sub_match_username: true,
+                validation: Validation {
+                    leeway: 0,
+                    validate_exp: true,
+                    validate_nbf: false,
+                    aud: None,
+                    iss: None,
+                    sub: None,
+                    algorithms: vec![Algorithm::RS256],
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn test_setup_invalid() {
+        env::remove_var("jwt_sec_env");
+
+        let mut opts = HashMap::new();
+        opts.insert("jwt_alg", "RS256");
+        opts.insert("jwt_sec_base64", "AA((");
+
+        let mut instance = MosquittoJWTAuthPluginInstance::new();
+        let result = instance.setup(opts);
+
+        assert_eq!(result.is_ok(), false);
+    }
+
+    #[test]
+    fn test_authenticate_user_signature_mismatch() {
         let mut instance = MosquittoJWTAuthPluginInstance::new();
         instance.config = Some(MosquittoJWTAuthPluginConfig {
             validation: Validation::default(),
@@ -528,7 +572,7 @@ mod tests {
     }
 
     #[test]
-    fn test_authenticate_user_sub_username_missmatch() {
+    fn test_authenticate_user_sub_username_mismatch() {
         let mut instance = MosquittoJWTAuthPluginInstance::new();
         instance.config = Some(MosquittoJWTAuthPluginConfig {
             validation: Validation {
@@ -601,7 +645,7 @@ mod tests {
                 validate_exp: false,
                 ..Validation::default()
             },
-            validate_sub_match_username: false,
+            validate_sub_match_username: true,
             secret: base64::decode("XmThTwNsoLBlbk3cbOi5r2g1EIJNT7o7zSKy9tMUsIg").unwrap(),
         });
 
