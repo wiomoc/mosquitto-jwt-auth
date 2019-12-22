@@ -35,7 +35,7 @@ fn test_valid() {
                        "-m", "abc"])
                    .output()
                    .unwrap()
-                   .stderr[..], b"Connection Refused: not authorised.\n"[..]);
+                   .stderr[..], b"Connection error: Connection Refused: not authorised.\n"[..]);
 
     assert!(child.try_wait().unwrap().is_none());
     child.kill().unwrap();

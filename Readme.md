@@ -6,7 +6,16 @@
 Simple Plugin for Mosquitto which enables authentication and authorisation via JWT as MQTT password.
 
 Requires at least Mosquitto v1.6.3
+
+## Building
+**Prebuild** version is available [here](https://github.com/wiomoc/mosquitto-jwt-auth/releases/latest)
+
+1. If not done yet, [install Rust](https://www.rust-lang.org/tools/install)
+2. Clone `git clone git@github.com:wiomoc/mosquitto-jwt-auth.git`
+3. Build `cargo build --release`, on success plugin should be located at `target/release/libmosquitto_jwt_auth.so`
+
 ## Configuration
+`auth_plugin` should point to the path of `libmosquitto_jwt_auth.so`
 
 | Property           | Valid values | Usage |
 |--------------------|------|-------|
