@@ -114,7 +114,7 @@ impl Permissions {
     }
 
     fn may_subscribe(&self, topic: &str) -> bool {
-        if let Ok(topic) = topic_utils::parse_topic_path(topic, false) {
+        if let Ok(topic) = topic_utils::parse_topic_path(topic, true) {
             self.sub
                 .iter()
                 .any(|filter| topic_utils::match_topic_to_topic_filter(filter, &topic))
@@ -124,7 +124,7 @@ impl Permissions {
     }
 
     fn may_publish(&self, topic: &str) -> bool {
-        if let Ok(topic) = topic_utils::parse_topic_path(topic, true) {
+        if let Ok(topic) = topic_utils::parse_topic_path(topic, false) {
             self.r#pub
                 .iter()
                 .any(|filter| topic_utils::match_topic_to_topic_filter(filter, &topic))
@@ -506,6 +506,7 @@ mod tests {
             sub: vec![
                 topic_utils::parse_topic_path("/123/55", true).unwrap(),
                 topic_utils::parse_topic_path("/+/23", true).unwrap(),
+                topic_utils::parse_topic_path("/abc/#", true).unwrap(),
             ],
         };
 
@@ -515,8 +516,17 @@ mod tests {
         let result = permissions.may_subscribe("/123/23");
         assert_eq!(result, true);
 
+        let result = permissions.may_subscribe("/+/23");
+        assert_eq!(result, true);
+
         let result = permissions.may_subscribe("/12#3/23");
-        assert_eq!(result, false)
+        assert_eq!(result, false);
+
+        let result = permissions.may_subscribe("/abc/23");
+        assert_eq!(result, true);
+
+        let result = permissions.may_subscribe("/abc/#");
+        assert_eq!(result, true);
     }
 
     #[test]
@@ -528,6 +538,12 @@ mod tests {
                 topic_utils::parse_topic_path("/+/23", true).unwrap(),
             ],
         };
+
+        let result = permissions.may_publish("/123/55");
+        assert_eq!(result, true);
+
+        let result = permissions.may_publish("/123/55/33");
+        assert_eq!(result, false);
 
         let result = permissions.may_publish("/123");
         assert_eq!(result, false);
