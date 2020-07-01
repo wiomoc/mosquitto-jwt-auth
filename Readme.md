@@ -29,7 +29,7 @@ Requires at least Mosquitto v1.6.3
 ## Custom Claims
 
 * `publ` _(Optional)_ Contains the Topics(filters) the client is allowed to publish in
-* `subl` _(Optional)_ Contains the Topics(filters) the client is allowed to subscribe to
+* `subs` _(Optional)_ Contains the Topics(filters) the client is allowed to subscribe to
 
 
       {
