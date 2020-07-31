@@ -165,13 +165,21 @@ impl MosquittoJWTAuthPluginInstance {
     pub(crate) fn authenticate_user(
         &mut self,
         client_id: ClientID,
-        username: &str,
-        password: &str,
+        username: Option<&str>,
+        password: Option<&str>,
     ) -> Result<(), ()> {
         let config = self.config.as_ref().unwrap();
 
-        let claims =
-            jsonwebtoken::decode::<Claims>(password, config.secret.as_ref(), &config.validation);
+        if password.is_none() {
+            eprintln!("jwt-auth: password not set");
+            return Err(());
+        }
+
+        let claims = jsonwebtoken::decode::<Claims>(
+            password.unwrap(),
+            config.secret.as_ref(),
+            &config.validation,
+        );
 
         let permissions = claims
             .map_err(|err| format!("{:?}", err))
@@ -180,13 +188,15 @@ impl MosquittoJWTAuthPluginInstance {
                 if !config.validate_sub_match_username {
                     Ok(claims)
                 } else if let Some(ref sub) = claims.sub {
-                    if sub.as_str() == username {
+                    if Some(sub.as_str()) == username {
                         Ok(claims)
-                    } else {
+                    } else if let Some(username) = username {
                         Err(format!(
                             "claim 'sub': '{}' doesn't match username: '{}'",
                             sub, username
                         ))
+                    } else {
+                        Err("username not set".to_string())
                     }
                 } else {
                     Err("claim 'sub' is missing".to_string())
@@ -274,9 +284,12 @@ mod tests {
 
         let result = MosquittoJWTAuthPluginConfig::from_opts(opts);
 
-        assert!(result.ok().unwrap().secret.starts_with(b"\x30\x82\x01\x22\x30\x0d\x06\x09"));
+        assert!(result
+            .ok()
+            .unwrap()
+            .secret
+            .starts_with(b"\x30\x82\x01\x22\x30\x0d\x06\x09"));
     }
-
 
     #[test]
     fn test_config_from_opts_sec_file_not_found() {
@@ -610,7 +623,7 @@ mod tests {
 
         let client_id = 33 as ClientID;
 
-        let result = instance.authenticate_user(client_id, "user", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJuYW1lIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SLwblB5xA5hytO2CCDI49iI50SuseVYInhdtXMhzN4s");
+        let result = instance.authenticate_user(client_id, Some("user"), Some("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJuYW1lIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SLwblB5xA5hytO2CCDI49iI50SuseVYInhdtXMhzN4s"));
 
         assert_eq!(result.is_err(), true);
         assert_eq!(instance.client_permissions.contains_key(&client_id), false);
@@ -630,7 +643,47 @@ mod tests {
 
         let client_id = 33 as ClientID;
 
-        let result = instance.authenticate_user(client_id, "user", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJuYW1lIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SLwblB5xA5hytO2CCDI49iI50SuseVYInhdtXMhzN4s");
+        let result = instance.authenticate_user(client_id, Some("user"), Some("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJuYW1lIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SLwblB5xA5hytO2CCDI49iI50SuseVYInhdtXMhzN4s"));
+
+        assert_eq!(result.is_err(), true);
+        assert_eq!(instance.client_permissions.contains_key(&client_id), false);
+    }
+
+    #[test]
+    fn test_authenticate_user_username_not_set() {
+        let mut instance = MosquittoJWTAuthPluginInstance::new();
+        instance.config = Some(MosquittoJWTAuthPluginConfig {
+            validation: Validation {
+                validate_exp: false,
+                ..Validation::default()
+            },
+            validate_sub_match_username: true,
+            secret: base64::decode("XmThTwNsoLBlbk3cbOi5r2g1EIJNT7o7zSKy9tMUsIg").unwrap(),
+        });
+
+        let client_id = 33 as ClientID;
+
+        let result = instance.authenticate_user(client_id, None, Some("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJuYW1lIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SLwblB5xA5hytO2CCDI49iI50SuseVYInhdtXMhzN4s"));
+
+        assert_eq!(result.is_err(), true);
+        assert_eq!(instance.client_permissions.contains_key(&client_id), false);
+    }
+
+    #[test]
+    fn test_authenticate_user_password_not_set() {
+        let mut instance = MosquittoJWTAuthPluginInstance::new();
+        instance.config = Some(MosquittoJWTAuthPluginConfig {
+            validation: Validation {
+                validate_exp: false,
+                ..Validation::default()
+            },
+            validate_sub_match_username: true,
+            secret: base64::decode("XmThTwNsoLBlbk3cbOi5r2g1EIJNT7o7zSKy9tMUsIg").unwrap(),
+        });
+
+        let client_id = 33 as ClientID;
+
+        let result = instance.authenticate_user(client_id, Some("user"), None);
 
         assert_eq!(result.is_err(), true);
         assert_eq!(instance.client_permissions.contains_key(&client_id), false);
@@ -650,7 +703,7 @@ mod tests {
 
         let client_id = 33 as ClientID;
 
-        let result = instance.authenticate_user(client_id, "user", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJuYW1lIjoiSm9obiBEb2UiLCJpYXQiOjE1MTYyMzkwMjJ9.aelYzUN2movT8bG3flOX3aNWZ8kS2ijQPVUUbhA7TW0");
+        let result = instance.authenticate_user(client_id, Some("user"), Some("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJuYW1lIjoiSm9obiBEb2UiLCJpYXQiOjE1MTYyMzkwMjJ9.aelYzUN2movT8bG3flOX3aNWZ8kS2ijQPVUUbhA7TW0"));
 
         assert_eq!(result.is_err(), true);
         assert_eq!(instance.client_permissions.contains_key(&client_id), false);
@@ -670,7 +723,7 @@ mod tests {
 
         let client_id = 33 as ClientID;
 
-        let result = instance.authenticate_user(client_id, "user", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJuYW1lIjoiSm9obiBEb2UiLCJpYXQiOjE1MTYyMzkwMjJ9.aelYzUN2movT8bG3flOX3aNWZ8kS2ijQPVUUbhA7TW0");
+        let result = instance.authenticate_user(client_id, Some("user"), Some("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJuYW1lIjoiSm9obiBEb2UiLCJpYXQiOjE1MTYyMzkwMjJ9.aelYzUN2movT8bG3flOX3aNWZ8kS2ijQPVUUbhA7TW0"));
 
         assert_eq!(result.is_ok(), true);
         assert_eq!(
@@ -696,7 +749,7 @@ mod tests {
 
         let client_id = 33 as ClientID;
 
-        let result = instance.authenticate_user(client_id, "name", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJuYW1lIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SLwblB5xA5hytO2CCDI49iI50SuseVYInhdtXMhzN4s");
+        let result = instance.authenticate_user(client_id, Some("name"), Some("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJuYW1lIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SLwblB5xA5hytO2CCDI49iI50SuseVYInhdtXMhzN4s"));
 
         assert_eq!(result.is_ok(), true);
         assert_eq!(

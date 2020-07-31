@@ -48,7 +48,7 @@ fn parse_topic_path_element(
     substring: &str,
     may_contain_wildcard: bool,
 ) -> Result<TopicPathElement, TopicPathError> {
-    match (substring.chars().nth(0).unwrap(), may_contain_wildcard) {
+    match (substring.chars().next().unwrap(), may_contain_wildcard) {
         ('#', true) => Ok(TopicPathElement::WildcardMultiLevel),
         ('+', true) => Ok(TopicPathElement::WildcardSingleLevel),
         ('#', false) | ('+', false) => Err(TopicPathError::WildcardInTopic),

@@ -1,4 +1,3 @@
-use std::mem::forget;
 use std::os::raw::{c_char, c_int, c_long, c_void};
 
 use crate::MosquittoJWTAuthPluginInstance;
@@ -106,10 +105,9 @@ pub extern "C" fn mosquitto_auth_security_init(
         })
         .collect();
 
-    let mut instance = unsafe { Box::from_raw(user_data as *mut MosquittoJWTAuthPluginInstance) };
+    let instance = unsafe { &mut *(user_data as *mut MosquittoJWTAuthPluginInstance) };
 
     let result = instance.setup(opts);
-    forget(instance);
 
     match result {
         Ok(_) => MOSQ_ERR_SUCCESS,
@@ -142,16 +140,23 @@ pub extern "C" fn mosquitto_auth_acl_check(
         _ => return MOSQ_ERR_PLUGIN_DEFER,
     };
 
-    let instance = unsafe { Box::from_raw(user_data as *mut MosquittoJWTAuthPluginInstance) };
+    let instance = unsafe { &mut *(user_data as *mut MosquittoJWTAuthPluginInstance) };
 
     let topic = unsafe { CStr::from_ptr((*msg).topic) }.to_str().unwrap();
 
     let result = instance.acl_check(client, acl_type, topic);
-    forget(instance);
 
     match result {
         Ok(_) => MOSQ_ERR_SUCCESS,
         Err(_) => MOSQ_ERR_ACL_DENIED,
+    }
+}
+
+fn option_cstr_from_ptr<'a>(cstr: *const c_char) -> Option<&'a str> {
+    if cstr.is_null() {
+        None
+    } else {
+        Some(unsafe { CStr::from_ptr(cstr) }.to_str().unwrap())
     }
 }
 
@@ -163,13 +168,13 @@ pub extern "C" fn mosquitto_auth_unpwd_check(
     username: *const c_char,
     password: *const c_char,
 ) -> c_int {
-    let mut instance = unsafe { Box::from_raw(user_data as *mut MosquittoJWTAuthPluginInstance) };
+    let instance = unsafe { &mut *(user_data as *mut MosquittoJWTAuthPluginInstance) };
 
-    let username = unsafe { CStr::from_ptr(username) }.to_str().unwrap();
-    let password = unsafe { CStr::from_ptr(password) }.to_str().unwrap();
+    println!("{:?} {:?}", username, password);
+    let username = option_cstr_from_ptr(username);
+    let password = option_cstr_from_ptr(password);
 
     let result = instance.authenticate_user(client, username, password);
-    forget(instance);
 
     match result {
         Ok(_) => MOSQ_ERR_SUCCESS,
