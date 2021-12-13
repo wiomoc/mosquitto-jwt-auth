@@ -53,13 +53,13 @@ pub(crate) enum AclType {
 pub(crate) type ClientID = *mut mosquitto;
 
 #[no_mangle]
-pub extern "C" fn mosquitto_auth_plugin_version() -> c_int {
+extern "C" fn mosquitto_auth_plugin_version() -> c_int {
     MOSQ_AUTH_PLUGIN_VERSION
 }
 
 #[no_mangle]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn mosquitto_auth_plugin_init(
+extern "C" fn mosquitto_auth_plugin_init(
     user_data: *mut *mut c_void,
     _opts: *mut mosquitto_opt,
     _opt_count: c_int,
@@ -75,7 +75,7 @@ pub extern "C" fn mosquitto_auth_plugin_init(
 
 #[no_mangle]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn mosquitto_auth_plugin_cleanup(
+extern "C" fn mosquitto_auth_plugin_cleanup(
     user_data: *mut c_void,
     _opts: *mut mosquitto_opt,
     _opt_count: c_int,
@@ -89,7 +89,7 @@ pub extern "C" fn mosquitto_auth_plugin_cleanup(
 
 #[no_mangle]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn mosquitto_auth_security_init(
+extern "C" fn mosquitto_auth_security_init(
     user_data: *mut c_void,
     opts: *mut mosquitto_opt,
     opt_count: c_int,
@@ -116,7 +116,7 @@ pub extern "C" fn mosquitto_auth_security_init(
 }
 
 #[no_mangle]
-pub extern "C" fn mosquitto_auth_security_cleanup(
+extern "C" fn mosquitto_auth_security_cleanup(
     _user_data: *mut c_void,
     _opts: *mut mosquitto_opt,
     _opt_count: c_int,
@@ -127,7 +127,7 @@ pub extern "C" fn mosquitto_auth_security_cleanup(
 
 #[no_mangle]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn mosquitto_auth_acl_check(
+extern "C" fn mosquitto_auth_acl_check(
     user_data: *mut c_void,
     access: c_int,
     client: *mut mosquitto,
@@ -162,7 +162,7 @@ fn option_cstr_from_ptr<'a>(cstr: *const c_char) -> Option<&'a str> {
 
 #[no_mangle]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn mosquitto_auth_unpwd_check(
+extern "C" fn mosquitto_auth_unpwd_check(
     user_data: *mut c_void,
     client: *mut mosquitto,
     username: *const c_char,
@@ -183,7 +183,7 @@ pub extern "C" fn mosquitto_auth_unpwd_check(
 }
 
 #[no_mangle]
-pub extern "C" fn mosquitto_auth_psk_key_get(
+extern "C" fn mosquitto_auth_psk_key_get(
     _user_data: *mut c_void,
     _client: *mut mosquitto,
     _hint: *const c_char,
@@ -195,7 +195,7 @@ pub extern "C" fn mosquitto_auth_psk_key_get(
 }
 
 #[no_mangle]
-pub extern "C" fn mosquitto_auth_start(
+extern "C" fn mosquitto_auth_start(
     _user_data: *mut c_void,
     _client: *mut mosquitto,
     _method: *const c_char,
@@ -209,7 +209,7 @@ pub extern "C" fn mosquitto_auth_start(
 }
 
 #[no_mangle]
-pub extern "C" fn mosquitto_auth_continue(
+extern "C" fn mosquitto_auth_continue(
     _user_data: *mut c_void,
     _client: *mut mosquitto,
     _method: *const c_char,

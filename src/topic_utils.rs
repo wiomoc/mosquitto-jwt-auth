@@ -141,6 +141,13 @@ mod tests {
     }
 
     #[test]
+    fn test_issue12() {
+        let filter = parse_topic_path("test/#", true).unwrap();
+        assert_eq!(match_topic_to_topic_filter(&filter, &filter), true);
+    }
+
+
+    #[test]
     fn test_match_topic_topic() {
         assert_eq!(
             match_topic_to_topic_filter(
