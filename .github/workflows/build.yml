@@ -1,0 +1,58 @@
+name: Build
+on: [push]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v2
+      - name: install mosquitto
+        run: sudo apt-get install -y mosquitto mosquitto-clients
+      - name: Cargo clippy
+        run: cargo clippy
+      - name: Cargo build
+        run: cargo build && cargo build --release
+      - name: Cargo test
+        run: cargo test --verbose
+        env:
+          RUST_TEST_THREADS: 1
+      - name: Coverage
+        continue-on-error: true
+        run: >
+          sudo apt-get install -y libcurl4-openssl-dev libelf-dev libdw-dev cmake gcc binutils-dev libiberty-dev &&
+          pushd . &&
+          cargo install cargo-kcov &&
+          mkdir kcov &&
+          cd kcov &&
+          cargo kcov --print-install-kcov-sh | sh &&
+          popd &&
+          rm -rf kcov &&
+          cargo kcov --all -v --no-clean-rebuild
+      - uses: coverallsapp/github-action@master
+        continue-on-error: true
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/')
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: Release ${{ github.ref }}
+          draft: false
+          prerelease: false
+      - name: Upload Release Asset
+        if: startsWith(github.ref, 'refs/tags/')
+        id: upload-release-asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./target/release/libmosquitto_jwt_auth.so
+          asset_name: libmosquitto_jwt_auth.so
+          asset_content_type: application/x-elf
