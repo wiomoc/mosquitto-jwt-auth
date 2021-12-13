@@ -12,28 +12,12 @@ jobs:
         run: sudo apt-get install -y mosquitto mosquitto-clients
       - name: Cargo clippy
         run: cargo clippy
-      - name: Cargo build
-        run: cargo build && cargo build --release
       - name: Cargo test
         run: cargo test --verbose
         env:
           RUST_TEST_THREADS: 1
-      - name: Coverage
-        continue-on-error: true
-        run: >
-          sudo apt-get install -y libcurl4-openssl-dev libelf-dev libdw-dev cmake gcc binutils-dev libiberty-dev &&
-          pushd . &&
-          cargo install cargo-kcov &&
-          mkdir kcov &&
-          cd kcov &&
-          cargo kcov --print-install-kcov-sh | sh &&
-          popd &&
-          rm -rf kcov &&
-          cargo kcov --all -v --no-clean-rebuild
-      - uses: coverallsapp/github-action@master
-        continue-on-error: true
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Cargo build
+        run: cargo build --release
       - name: Create Release
         if: startsWith(github.ref, 'refs/tags/')
         id: create_release
