@@ -17,8 +17,9 @@ coveralls = { repository = "wiomoc/mosquitto-jwt-auth" }
 crate-type=["dylib"]
 
 [dependencies]
-serde_derive = "1.0.97"
-serde = "1.0.97"
+serde_derive = "1.0.100"
+serde = "1.0.100"
+serde_json = "1.0.73"
 base64 = "0.10.1"
 biscuit = "0.6.0-beta1"
-serde_variant = "0.1.1"
+num-bigint = "0.3.3"

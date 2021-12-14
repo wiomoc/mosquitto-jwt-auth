@@ -2,10 +2,12 @@ extern crate base64;
 extern crate biscuit;
 #[macro_use]
 extern crate serde_derive;
+extern crate serde_json;
 
 use crate::mosquitto_sys::{AclType, ClientID};
 use crate::topic_utils::TopicPath;
 use biscuit::jwa::SignatureAlgorithm;
+use biscuit::jwk::JWKSet;
 use biscuit::jws::Secret;
 use biscuit::{Validation, ValidationOptions, JWT};
 use std::collections::HashMap;
@@ -16,9 +18,16 @@ use std::io::Read;
 pub mod mosquitto_sys;
 mod topic_utils;
 
+enum SignatureVerifier {
+    Key {
+        secret: Secret,
+        signature_algorithm: SignatureAlgorithm,
+    },
+    JWKS(JWKSet<biscuit::Empty>),
+}
+
 struct PluginConfig {
-    secret: Secret,
-    signature_algorithm: SignatureAlgorithm,
+    verifier: SignatureVerifier,
     validation: ValidationOptions,
     validate_sub_match_username: bool,
 }
@@ -42,30 +51,54 @@ impl PluginConfig {
         })
     }
     fn from_opts(opts: HashMap<&str, &str>) -> Result<PluginConfig, &'static str> {
-        let signature_algorithm = PluginConfig::parse_signature_algorithm(
-            &opts.get("jwt_alg").ok_or("'auth_opt_jwt_alg' is missing")?[..],
-        )
-        .map_err(|_| "'auth_opt_jwt_alg' is not a valid jwt alg")?;
-
-        let secret_bytes = if let Some(secret_file_opt) = opts.get("jwt_sec_file") {
+        let verifier = if let Some(jwks_file) = opts.get("jwt_jwks_file") {
             let mut file_contents = Vec::new();
-
-            File::open(secret_file_opt)
-                .map_err(|_| "couldn't open secret file")?
+            File::open(jwks_file)
+                .map_err(|_| "couldn't open jwks file")?
                 .read_to_end(&mut file_contents)
-                .map_err(|_| "couldn't read secret file")?;
-
-            file_contents
-        } else if let Some(secret_env_opt) = opts.get("jwt_sec_env") {
-            if let Ok(secret_base64) = env::var(secret_env_opt) {
-                base64::decode(&secret_base64).map_err(|_| "invalid base64")?
-            } else {
-                return Err("environment variable not set");
-            }
-        } else if let Some(secret_opt) = opts.get("jwt_sec_base64") {
-            base64::decode(secret_opt).map_err(|_| "invalid base64")?
+                .map_err(|_| "couldn't read jwks file")?;
+            SignatureVerifier::JWKS(
+                serde_json::from_str(String::from_utf8_lossy(&file_contents).as_ref())
+                    .map_err(|_| "couldn't parse jwks file")?,
+            )
         } else {
-            return Err("jwt_sec_file, jwt_sec_env or jwt_sec_base64 missing");
+            let signature_algorithm = PluginConfig::parse_signature_algorithm(
+                &opts.get("jwt_alg").ok_or("'auth_opt_jwt_alg' is missing")?[..],
+            )
+            .map_err(|_| "'auth_opt_jwt_alg' is not a valid jwt alg")?;
+
+            let secret_bytes = if let Some(secret_file_opt) = opts.get("jwt_sec_file") {
+                let mut file_contents = Vec::new();
+
+                File::open(secret_file_opt)
+                    .map_err(|_| "couldn't open secret file")?
+                    .read_to_end(&mut file_contents)
+                    .map_err(|_| "couldn't read secret file")?;
+
+                file_contents
+            } else if let Some(secret_env_opt) = opts.get("jwt_sec_env") {
+                if let Ok(secret_base64) = env::var(secret_env_opt) {
+                    base64::decode(&secret_base64).map_err(|_| "invalid base64")?
+                } else {
+                    return Err("environment variable not set");
+                }
+            } else if let Some(secret_opt) = opts.get("jwt_sec_base64") {
+                base64::decode(secret_opt).map_err(|_| "invalid base64")?
+            } else {
+                return Err("jwt_sec_file, jwt_sec_env or jwt_sec_base64 missing");
+            };
+
+            let secret = match signature_algorithm {
+                SignatureAlgorithm::HS256
+                | SignatureAlgorithm::HS384
+                | SignatureAlgorithm::HS512 => Secret::Bytes(secret_bytes),
+                _ => Secret::PublicKey(secret_bytes),
+            };
+
+            SignatureVerifier::Key {
+                secret,
+                signature_algorithm,
+            }
         };
 
         let validate_exp = if let Some(opt) = opts.get("jwt_validate_exp") {
@@ -73,13 +106,6 @@ impl PluginConfig {
                 .map_err(|_| "'auth_opt_jwt_validate_exp' is not a boolean")?
         } else {
             true
-        };
-
-        let secret = match signature_algorithm {
-            SignatureAlgorithm::HS256 | SignatureAlgorithm::HS384 | SignatureAlgorithm::HS512 => {
-                Secret::Bytes(secret_bytes)
-            }
-            _ => Secret::PublicKey(secret_bytes),
         };
 
         let validate_sub_match_username =
@@ -100,8 +126,7 @@ impl PluginConfig {
         };
 
         Ok(PluginConfig {
-            secret,
-            signature_algorithm,
+            verifier,
             validation,
             validate_sub_match_username,
         })
@@ -196,9 +221,14 @@ impl PluginInstance {
     ) -> Result<Permissions, String> {
         let token = token.ok_or_else(|| "token not given".to_string())?;
         let token = JWT::<Claims, biscuit::Empty>::new_encoded(token);
-        let token = token
-            .into_decoded(&config.secret, config.signature_algorithm)
-            .map_err(|err| format!("error decoding jwt: {:?}", err))?;
+        let token = match &config.verifier {
+            SignatureVerifier::Key {
+                signature_algorithm,
+                secret,
+            } => token.decode(secret, signature_algorithm.clone()),
+            SignatureVerifier::JWKS(jwks) => token.decode_with_jwks(&jwks, None),
+        }
+        .map_err(|err| format!("error decoding jwt: {:?}", err))?;
         token
             .validate(config.validation.clone())
             .map_err(|err| format!("error validating jwt: {:?}", err))?;
@@ -268,7 +298,10 @@ impl PluginInstance {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use biscuit::jwa::SignatureAlgorithm;
+    use crate::SignatureVerifier;
+    use biscuit::jwa::{Algorithm, SignatureAlgorithm};
+    use biscuit::jwk::{AlgorithmParameters, CommonParameters, RSAKeyParameters, RSAKeyType, JWK};
+    use num_bigint::BigUint;
 
     #[test]
     fn test_config_from_opts_empty_opts() {
@@ -313,8 +346,12 @@ mod tests {
 
         let result = PluginConfig::from_opts(opts);
 
-        if let Secret::PublicKey(secret) = result.unwrap().secret {
-            assert!(secret.starts_with(b"\x30\x82\x01\x22\x30\x0d\x06\x09"));
+        if let SignatureVerifier::Key { secret, .. } = result.unwrap().verifier {
+            if let Secret::PublicKey(secret) = secret {
+                assert!(secret.starts_with(b"\x30\x82\x01\x22\x30\x0d\x06\x09"));
+            } else {
+                panic!()
+            }
         } else {
             panic!()
         }
@@ -345,21 +382,34 @@ mod tests {
         assert_eq!(result.err().unwrap(), "invalid base64");
     }
 
-    fn assert_same_config(
-        actual: PluginConfig,
-        expected: PluginConfig,
-    ) {
+    fn assert_same_config(actual: PluginConfig, expected: PluginConfig) {
         assert_eq!(
             actual.validate_sub_match_username,
             expected.validate_sub_match_username
         );
-        assert_eq!(actual.signature_algorithm, expected.signature_algorithm);
         assert!(actual.validation == expected.validation);
-        match (actual.secret, expected.secret) {
-            (Secret::Bytes(a), Secret::Bytes(b)) => assert_eq!(a, b),
-            (Secret::PublicKey(a), Secret::PublicKey(b)) => assert_eq!(a, b),
+
+        match (actual.verifier, expected.verifier) {
+            (
+                SignatureVerifier::Key {
+                    secret: secret_a,
+                    signature_algorithm: signature_algorithm_a,
+                },
+                SignatureVerifier::Key {
+                    secret: secret_b,
+                    signature_algorithm: signature_algorithm_b,
+                },
+            ) => {
+                match (secret_a, secret_b) {
+                    (Secret::Bytes(a), Secret::Bytes(b)) => assert_eq!(a, b),
+                    (Secret::PublicKey(a), Secret::PublicKey(b)) => assert_eq!(a, b),
+                    _ => panic!(),
+                };
+                assert_eq!(signature_algorithm_a, signature_algorithm_b);
+            }
+            (SignatureVerifier::JWKS(a), SignatureVerifier::JWKS(b)) => assert!(a == b),
             _ => panic!(),
-        };
+        }
     }
 
     #[test]
@@ -375,8 +425,43 @@ mod tests {
         assert_same_config(
             result.ok().unwrap(),
             PluginConfig {
-                secret: Secret::Bytes(vec![0, 0, 0x41]),
-                signature_algorithm: SignatureAlgorithm::HS256,
+                verifier: SignatureVerifier::Key {
+                    secret: Secret::Bytes(vec![0, 0, 0x41]),
+                    signature_algorithm: SignatureAlgorithm::HS256,
+                },
+                validate_sub_match_username: true,
+                validation: ValidationOptions {
+                    expiry: Validation::Validate(()),
+                    ..Default::default()
+                },
+            },
+        );
+    }
+
+    #[test]
+    fn test_config_from_opts_valid_jwks() {
+        let mut opts = HashMap::new();
+        opts.insert("jwt_jwks_file", "tests/jwks.json");
+
+        let result = PluginConfig::from_opts(opts);
+
+        assert_same_config(
+            result.ok().unwrap(),
+            PluginConfig {
+                verifier: SignatureVerifier::JWKS(JWKSet{keys: vec![JWK{
+                    additional: biscuit::Empty{},
+                    common: CommonParameters {
+                        algorithm: Some(Algorithm::Signature(SignatureAlgorithm::RS256)),
+                        key_id: Some("test1".to_string()),
+                        ..Default::default()
+                    },
+                    algorithm: AlgorithmParameters::RSA(RSAKeyParameters {
+                        key_type: RSAKeyType::RSA,
+                        e: BigUint::from_bytes_be(&base64::decode("AQAB").unwrap()),
+                        n: BigUint::from_bytes_be(&base64::decode("ghhGwdfUlPnbqbIGKRkp3ATiBP96iYf3g687/dv82XC1SAp+JQxnPLSVz83s9iiBWLV/3IA08ot/GuZTBLYhIW/EX5OT0KOP1GhnSlXyo90dMq+yMQl+kHRP2A38gjFhG2QFf4UMjSHcEV4gJ+htfX6Tm/E5Ow4HJXx8nYiNAdLFGdUl1j44lJDwCa8H+Bz2A54HZ5wXQ7mYmNImueX/raGK6KWOzLWQeNp2NDa9nXHTU0cZ8Qe1R51EYzs5sXY8w/Nu8aYW9bDe6xI1Gelf3CeIQFioW3ttqtv49Fv5Kfbf6J6Ce36MZyZOFMI2pikNEMAq1npphC5XIdd55QtsWQ").unwrap()),
+                            ..Default::default()
+                    })
+                }]}),
                 validate_sub_match_username: true,
                 validation: ValidationOptions {
                     expiry: Validation::Validate(()),
@@ -425,8 +510,10 @@ mod tests {
         assert_same_config(
             result.ok().unwrap(),
             PluginConfig {
-                secret: Secret::PublicKey(vec![0, 0, 0x41]),
-                signature_algorithm: SignatureAlgorithm::RS256,
+                verifier: SignatureVerifier::Key {
+                    secret: Secret::PublicKey(vec![0, 0, 0x41]),
+                    signature_algorithm: SignatureAlgorithm::RS256,
+                },
                 validate_sub_match_username: true,
                 validation: ValidationOptions {
                     expiry: Validation::Validate(()),
@@ -450,8 +537,10 @@ mod tests {
         assert_same_config(
             result.ok().unwrap(),
             PluginConfig {
-                secret: Secret::PublicKey(vec![0, 0, 0x41]),
-                signature_algorithm: SignatureAlgorithm::RS256,
+                verifier: SignatureVerifier::Key {
+                    secret: Secret::PublicKey(vec![0, 0, 0x41]),
+                    signature_algorithm: SignatureAlgorithm::RS256,
+                },
                 validate_sub_match_username: true,
                 validation: ValidationOptions {
                     expiry: Validation::Ignored,
@@ -492,8 +581,10 @@ mod tests {
         assert_same_config(
             result.ok().unwrap(),
             PluginConfig {
-                secret: Secret::Bytes(vec![0, 0, 0x41]),
-                signature_algorithm: SignatureAlgorithm::HS256,
+                verifier: SignatureVerifier::Key {
+                    secret: Secret::Bytes(vec![0, 0, 0x41]),
+                    signature_algorithm: SignatureAlgorithm::HS256,
+                },
                 validate_sub_match_username: false,
                 validation: ValidationOptions {
                     expiry: Validation::Validate(()),
@@ -536,7 +627,7 @@ mod tests {
                 r#pub: Vec::new(),
                 sub: vec![
                     topic_utils::parse_topic_path("#", true).unwrap(),
-                    topic_utils::parse_topic_path("/123/55", true).unwrap()
+                    topic_utils::parse_topic_path("/123/55", true).unwrap(),
                 ],
             }
         )
@@ -613,8 +704,10 @@ mod tests {
         assert_same_config(
             instance.config.unwrap(),
             PluginConfig {
-                secret: Secret::PublicKey(vec![0, 0, 0x41]),
-                signature_algorithm: SignatureAlgorithm::RS256,
+                verifier: SignatureVerifier::Key {
+                    secret: Secret::PublicKey(vec![0, 0, 0x41]),
+                    signature_algorithm: SignatureAlgorithm::RS256,
+                },
                 validate_sub_match_username: true,
                 validation: ValidationOptions {
                     expiry: Validation::Validate(()),
@@ -643,11 +736,13 @@ mod tests {
         let mut instance = PluginInstance::new();
         instance.config = Some(PluginConfig {
             validation: ValidationOptions::default(),
-            signature_algorithm: SignatureAlgorithm::HS256,
             validate_sub_match_username: true,
-            secret: Secret::Bytes(
-                base64::decode("XmThTwNsoLBlbk3cbOi5r2g1EIJNT7o7zSKc9tMUsIg").unwrap(),
-            ),
+            verifier: SignatureVerifier::Key {
+                signature_algorithm: SignatureAlgorithm::HS256,
+                secret: Secret::Bytes(
+                    base64::decode("XmThTwNsoLBlbk3cbOi5r2g1EIJNT7o7zSKc9tMUsIg").unwrap(),
+                ),
+            },
         });
 
         let client_id = 33 as ClientID;
@@ -666,11 +761,13 @@ mod tests {
                 expiry: Validation::Ignored,
                 ..Default::default()
             },
-            signature_algorithm: SignatureAlgorithm::HS256,
             validate_sub_match_username: true,
-            secret: Secret::Bytes(
-                base64::decode("XmThTwNsoLBlbk3cbOi5r2g1EIJNT7o7zSKy9tMUsIg").unwrap(),
-            ),
+            verifier: SignatureVerifier::Key {
+                signature_algorithm: SignatureAlgorithm::HS256,
+                secret: Secret::Bytes(
+                    base64::decode("XmThTwNsoLBlbk3cbOi5r2g1EIJNT7o7zSKy9tMUsIg").unwrap(),
+                ),
+            },
         });
 
         let client_id = 33 as ClientID;
@@ -690,10 +787,12 @@ mod tests {
                 ..Default::default()
             },
             validate_sub_match_username: true,
-            signature_algorithm: SignatureAlgorithm::HS256,
-            secret: Secret::Bytes(
-                base64::decode("XmThTwNsoLBlbk3cbOi5r2g1EIJNT7o7zSKy9tMUsIg").unwrap(),
-            ),
+            verifier: SignatureVerifier::Key {
+                signature_algorithm: SignatureAlgorithm::HS256,
+                secret: Secret::Bytes(
+                    base64::decode("XmThTwNsoLBlbk3cbOi5r2g1EIJNT7o7zSKy9tMUsIg").unwrap(),
+                ),
+            },
         });
 
         let client_id = 33 as ClientID;
@@ -713,10 +812,12 @@ mod tests {
                 ..Default::default()
             },
             validate_sub_match_username: true,
-            signature_algorithm: SignatureAlgorithm::HS256,
-            secret: Secret::Bytes(
-                base64::decode("XmThTwNsoLBlbk3cbOi5r2g1EIJNT7o7zSKy9tMUsIg").unwrap(),
-            ),
+            verifier: SignatureVerifier::Key {
+                signature_algorithm: SignatureAlgorithm::HS256,
+                secret: Secret::Bytes(
+                    base64::decode("XmThTwNsoLBlbk3cbOi5r2g1EIJNT7o7zSKy9tMUsIg").unwrap(),
+                ),
+            },
         });
 
         let client_id = 33 as ClientID;
@@ -736,10 +837,12 @@ mod tests {
                 ..Default::default()
             },
             validate_sub_match_username: true,
-            signature_algorithm: SignatureAlgorithm::HS256,
-            secret: Secret::Bytes(
-                base64::decode("XmThTwNsoLBlbk3cbOi5r2g1EIJNT7o7zSKy9tMUsIg").unwrap(),
-            ),
+            verifier: SignatureVerifier::Key {
+                signature_algorithm: SignatureAlgorithm::HS256,
+                secret: Secret::Bytes(
+                    base64::decode("XmThTwNsoLBlbk3cbOi5r2g1EIJNT7o7zSKy9tMUsIg").unwrap(),
+                ),
+            },
         });
 
         let client_id = 33 as ClientID;
@@ -759,10 +862,12 @@ mod tests {
                 ..Default::default()
             },
             validate_sub_match_username: false,
-            signature_algorithm: SignatureAlgorithm::HS256,
-            secret: Secret::Bytes(
-                base64::decode("XmThTwNsoLBlbk3cbOi5r2g1EIJNT7o7zSKy9tMUsIg").unwrap(),
-            ),
+            verifier: SignatureVerifier::Key {
+                signature_algorithm: SignatureAlgorithm::HS256,
+                secret: Secret::Bytes(
+                    base64::decode("XmThTwNsoLBlbk3cbOi5r2g1EIJNT7o7zSKy9tMUsIg").unwrap(),
+                ),
+            },
         });
 
         let client_id = 33 as ClientID;
@@ -788,10 +893,12 @@ mod tests {
                 ..Default::default()
             },
             validate_sub_match_username: true,
-            signature_algorithm: SignatureAlgorithm::HS256,
-            secret: Secret::Bytes(
-                base64::decode("XmThTwNsoLBlbk3cbOi5r2g1EIJNT7o7zSKy9tMUsIg").unwrap(),
-            ),
+            verifier: SignatureVerifier::Key {
+                signature_algorithm: SignatureAlgorithm::HS256,
+                secret: Secret::Bytes(
+                    base64::decode("XmThTwNsoLBlbk3cbOi5r2g1EIJNT7o7zSKy9tMUsIg").unwrap(),
+                ),
+            },
         });
 
         let client_id = 33 as ClientID;
@@ -809,13 +916,38 @@ mod tests {
     }
 
     #[test]
+    fn test_authenticate_user_sub_matching_jwks() {
+        let mut instance = PluginInstance::new();
+        let mut opts = HashMap::new();
+        opts.insert("jwt_jwks_file", "tests/jwks.json");
+
+        let result = PluginConfig::from_opts(opts);
+        instance.config = Some(result.unwrap());
+
+        let client_id = 33 as ClientID;
+
+        let result = instance.authenticate_user(client_id, Some("name"), Some("eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6InRlc3QxIn0.eyJzdWIiOiJuYW1lIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.dHa1960ZrCnTiDGYuyLGZZuRmaZICUyJDnj2ILL7C-5EpsCByyIByhttvqN4gjVpT7HhitoBFd-r7ssg0mgv6d6QQd7WX0VCIeD1hFEEr3Q76yzXEmAim5fqYP2lg6vWMQEhewN3xSI8H5TeRksSXu0RknW0s-WkoKaU3JuTh2HsMXdVW-L0yIsM9LOJaJ2UBC3DN0TieRydsjSDmXppblKVgSd4s0nkWFDzvFQmzFKoWxZmx19KXxo9XDzJ3zUOxGp_hH0OTqgMl8XuSETp3TxuezBi3d1HLMSItH3yyvxmN0E_sDQ25v_iAl7C8e7iQZa4JdwA-QCy85JfabBwFQ"));
+
+        assert_eq!(result.is_ok(), true);
+        assert_eq!(
+            instance.client_permissions.get(&client_id).unwrap(),
+            &Permissions {
+                sub: Vec::new(),
+                r#pub: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
     fn test_acl_check() {
         let mut instance = PluginInstance::new();
         instance.config = Some(PluginConfig {
             validation: Default::default(),
             validate_sub_match_username: true,
-            signature_algorithm: SignatureAlgorithm::HS256,
-            secret: Secret::Bytes(vec![]),
+            verifier: SignatureVerifier::Key {
+                signature_algorithm: SignatureAlgorithm::HS256,
+                secret: Secret::Bytes(vec![]),
+            },
         });
 
         let client_id0 = 33 as ClientID;
