@@ -1,7 +1,7 @@
 [package]
 name = "mosquitto-jwt-auth"
 description = "Plugin for Mosquitto MQTT broker, which enables authentication and authorisation via JWT over password."
-version = "0.3.0"
+version = "0.4.0"
 authors = ["Christoph Walcher <christoph-wa@gmx.de>"]
 edition = "2018"
 readme = "Readme.md"
