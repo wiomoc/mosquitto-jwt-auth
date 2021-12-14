@@ -23,3 +23,6 @@ serde_json = "1.0.73"
 base64 = "0.10.1"
 biscuit = "0.6.0-beta1"
 num-bigint = "0.3.3"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2.112"
