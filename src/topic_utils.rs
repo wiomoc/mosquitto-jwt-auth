@@ -146,7 +146,6 @@ mod tests {
         assert_eq!(match_topic_to_topic_filter(&filter, &filter), true);
     }
 
-
     #[test]
     fn test_match_topic_topic() {
         assert_eq!(

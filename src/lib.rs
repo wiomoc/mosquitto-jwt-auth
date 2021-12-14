@@ -1,33 +1,53 @@
 extern crate base64;
-extern crate jsonwebtoken;
+extern crate biscuit;
 #[macro_use]
 extern crate serde_derive;
 
 use crate::mosquitto_sys::{AclType, ClientID};
 use crate::topic_utils::TopicPath;
-use jsonwebtoken::{Algorithm, Validation};
+use biscuit::jwa::SignatureAlgorithm;
+use biscuit::jws::Secret;
+use biscuit::{Validation, ValidationOptions, JWT};
 use std::collections::HashMap;
 use std::env;
 use std::fs::File;
 use std::io::Read;
-use std::str::FromStr;
 
 pub mod mosquitto_sys;
 mod topic_utils;
 
-#[derive(PartialEq, Debug)]
-struct MosquittoJWTAuthPluginConfig {
-    secret: Vec<u8>,
-    validation: Validation,
+struct PluginConfig {
+    secret: Secret,
+    signature_algorithm: SignatureAlgorithm,
+    validation: ValidationOptions,
     validate_sub_match_username: bool,
 }
 
-impl MosquittoJWTAuthPluginConfig {
-    fn from_opts(opts: HashMap<&str, &str>) -> Result<MosquittoJWTAuthPluginConfig, &'static str> {
-        let alg = Algorithm::from_str(opts.get("jwt_alg").ok_or("'auth_opt_jwt_alg' is missing")?)
-            .map_err(|_| "'auth_opt_jwt_alg' is not a valid jwt alg")?;
+impl PluginConfig {
+    fn parse_signature_algorithm(string: &str) -> Result<SignatureAlgorithm, ()> {
+        Ok(match string {
+            "HS256" => SignatureAlgorithm::HS256,
+            "HS384" => SignatureAlgorithm::HS384,
+            "HS512" => SignatureAlgorithm::HS512,
+            "ES256" => SignatureAlgorithm::ES256,
+            "ES384" => SignatureAlgorithm::ES384,
+            "ES512" => SignatureAlgorithm::ES512,
+            "RS256" => SignatureAlgorithm::RS256,
+            "RS384" => SignatureAlgorithm::RS384,
+            "RS512" => SignatureAlgorithm::RS512,
+            "PS256" => SignatureAlgorithm::PS256,
+            "PS384" => SignatureAlgorithm::PS384,
+            "PS512" => SignatureAlgorithm::PS512,
+            _ => return Err(()),
+        })
+    }
+    fn from_opts(opts: HashMap<&str, &str>) -> Result<PluginConfig, &'static str> {
+        let signature_algorithm = PluginConfig::parse_signature_algorithm(
+            &opts.get("jwt_alg").ok_or("'auth_opt_jwt_alg' is missing")?[..],
+        )
+        .map_err(|_| "'auth_opt_jwt_alg' is not a valid jwt alg")?;
 
-        let secret = if let Some(secret_file_opt) = opts.get("jwt_sec_file") {
+        let secret_bytes = if let Some(secret_file_opt) = opts.get("jwt_sec_file") {
             let mut file_contents = Vec::new();
 
             File::open(secret_file_opt)
@@ -55,6 +75,13 @@ impl MosquittoJWTAuthPluginConfig {
             true
         };
 
+        let secret = match signature_algorithm {
+            SignatureAlgorithm::HS256 | SignatureAlgorithm::HS384 | SignatureAlgorithm::HS512 => {
+                Secret::Bytes(secret_bytes)
+            }
+            _ => Secret::PublicKey(secret_bytes),
+        };
+
         let validate_sub_match_username =
             if let Some(opt) = opts.get("jwt_validate_sub_match_username") {
                 opt.parse::<bool>()
@@ -63,26 +90,26 @@ impl MosquittoJWTAuthPluginConfig {
                 true
             };
 
-        let validation = Validation {
-            leeway: 0,
-            validate_exp,
-            validate_nbf: false,
-            aud: None,
-            iss: None,
-            sub: None,
-            algorithms: vec![alg],
+        let validation = ValidationOptions {
+            expiry: if validate_exp {
+                Validation::Validate(())
+            } else {
+                Validation::Ignored
+            },
+            ..Default::default()
         };
 
-        Ok(MosquittoJWTAuthPluginConfig {
+        Ok(PluginConfig {
             secret,
+            signature_algorithm,
             validation,
             validate_sub_match_username,
         })
     }
 }
 
-pub(crate) struct MosquittoJWTAuthPluginInstance {
-    config: Option<MosquittoJWTAuthPluginConfig>,
+pub(crate) struct PluginInstance {
+    config: Option<PluginConfig>,
     client_permissions: HashMap<ClientID, Permissions>,
 }
 
@@ -93,7 +120,7 @@ struct Permissions {
 }
 
 impl Permissions {
-    fn read_filter_claim(filter: Option<Vec<String>>) -> Result<Vec<TopicPath>, String> {
+    fn read_filter_claim(filter: Option<&[String]>) -> Result<Vec<TopicPath>, String> {
         if let Some(filter) = filter {
             filter
                 .iter()
@@ -106,10 +133,10 @@ impl Permissions {
         }
     }
 
-    fn from_claims(claims: Claims) -> Result<Permissions, String> {
+    fn from_claims(claims: &Claims) -> Result<Permissions, String> {
         Ok(Permissions {
-            r#pub: Permissions::read_filter_claim(claims.publ)?,
-            sub: Permissions::read_filter_claim(claims.subs)?,
+            r#pub: Permissions::read_filter_claim(claims.publ.as_deref())?,
+            sub: Permissions::read_filter_claim(claims.subs.as_deref())?,
         })
     }
 
@@ -141,16 +168,16 @@ struct Claims {
     subs: Option<Vec<String>>,
 }
 
-impl MosquittoJWTAuthPluginInstance {
-    pub(crate) fn new() -> MosquittoJWTAuthPluginInstance {
-        MosquittoJWTAuthPluginInstance {
+impl PluginInstance {
+    pub(crate) fn new() -> PluginInstance {
+        PluginInstance {
             config: None,
             client_permissions: HashMap::new(),
         }
     }
 
     pub(crate) fn setup(&mut self, opts: HashMap<&str, &str>) -> Result<(), ()> {
-        match MosquittoJWTAuthPluginConfig::from_opts(opts) {
+        match PluginConfig::from_opts(opts) {
             Ok(config) => {
                 self.config = Some(config);
                 Ok(())
@@ -162,6 +189,41 @@ impl MosquittoJWTAuthPluginInstance {
         }
     }
 
+    fn extract_jwt(
+        token: Option<&str>,
+        config: &PluginConfig,
+        username: Option<&str>,
+    ) -> Result<Permissions, String> {
+        let token = token.ok_or_else(|| "token not given".to_string())?;
+        let token = JWT::<Claims, biscuit::Empty>::new_encoded(token);
+        let token = token
+            .into_decoded(&config.secret, config.signature_algorithm)
+            .map_err(|err| format!("error decoding jwt: {:?}", err))?;
+        token
+            .validate(config.validation.clone())
+            .map_err(|err| format!("error validating jwt: {:?}", err))?;
+        let claims = &token
+            .payload()
+            .map_err(|err| format!("error decoding jwt claims: {:?}", err))?;
+        if config.validate_sub_match_username {
+            if let Some(ref sub) = claims.registered.subject {
+                if let Some(username) = username {
+                    if username != sub {
+                        return Err(format!(
+                            "claim 'sub': '{}' doesn't match username: '{}'",
+                            sub, username
+                        ));
+                    }
+                } else {
+                    return Err("username not set".to_string());
+                }
+            } else {
+                return Err("claim 'sub' is missing".to_string());
+            }
+        }
+        Permissions::from_claims(&claims.private)
+    }
+
     pub(crate) fn authenticate_user(
         &mut self,
         client_id: ClientID,
@@ -169,41 +231,7 @@ impl MosquittoJWTAuthPluginInstance {
         password: Option<&str>,
     ) -> Result<(), ()> {
         let config = self.config.as_ref().unwrap();
-
-        if password.is_none() {
-            eprintln!("jwt-auth: password not set");
-            return Err(());
-        }
-
-        let claims = jsonwebtoken::decode::<Claims>(
-            password.unwrap(),
-            config.secret.as_ref(),
-            &config.validation,
-        );
-
-        let permissions = claims
-            .map_err(|err| format!("{:?}", err))
-            .map(|token_data| token_data.claims)
-            .and_then(|claims| {
-                if !config.validate_sub_match_username {
-                    Ok(claims)
-                } else if let Some(ref sub) = claims.sub {
-                    if Some(sub.as_str()) == username {
-                        Ok(claims)
-                    } else if let Some(username) = username {
-                        Err(format!(
-                            "claim 'sub': '{}' doesn't match username: '{}'",
-                            sub, username
-                        ))
-                    } else {
-                        Err("username not set".to_string())
-                    }
-                } else {
-                    Err("claim 'sub' is missing".to_string())
-                }
-            })
-            .and_then(Permissions::from_claims);
-
+        let permissions = PluginInstance::extract_jwt(password, config, username);
         match permissions {
             Ok(permissions) => {
                 self.client_permissions.insert(client_id, permissions);
@@ -240,12 +268,13 @@ impl MosquittoJWTAuthPluginInstance {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use biscuit::jwa::SignatureAlgorithm;
 
     #[test]
     fn test_config_from_opts_empty_opts() {
         let opts = HashMap::new();
 
-        let result = MosquittoJWTAuthPluginConfig::from_opts(opts);
+        let result = PluginConfig::from_opts(opts);
 
         assert_eq!(result.err().unwrap(), "'auth_opt_jwt_alg' is missing");
     }
@@ -255,7 +284,7 @@ mod tests {
         let mut opts = HashMap::new();
         opts.insert("jwt_alg", "HS344");
 
-        let result = MosquittoJWTAuthPluginConfig::from_opts(opts);
+        let result = PluginConfig::from_opts(opts);
 
         assert_eq!(
             result.err().unwrap(),
@@ -268,7 +297,7 @@ mod tests {
         let mut opts = HashMap::new();
         opts.insert("jwt_alg", "HS256");
 
-        let result = MosquittoJWTAuthPluginConfig::from_opts(opts);
+        let result = PluginConfig::from_opts(opts);
 
         assert_eq!(
             result.err().unwrap(),
@@ -282,13 +311,13 @@ mod tests {
         opts.insert("jwt_alg", "RS256");
         opts.insert("jwt_sec_file", "tests/public.der");
 
-        let result = MosquittoJWTAuthPluginConfig::from_opts(opts);
+        let result = PluginConfig::from_opts(opts);
 
-        assert!(result
-            .ok()
-            .unwrap()
-            .secret
-            .starts_with(b"\x30\x82\x01\x22\x30\x0d\x06\x09"));
+        if let Secret::PublicKey(secret) = result.unwrap().secret {
+            assert!(secret.starts_with(b"\x30\x82\x01\x22\x30\x0d\x06\x09"));
+        } else {
+            panic!()
+        }
     }
 
     #[test]
@@ -297,7 +326,7 @@ mod tests {
         opts.insert("jwt_alg", "RS256");
         opts.insert("jwt_sec_file", "tests/publicsfd.der");
 
-        let result = MosquittoJWTAuthPluginConfig::from_opts(opts);
+        let result = PluginConfig::from_opts(opts);
 
         assert_eq!(result.err().unwrap(), "couldn't open secret file");
     }
@@ -310,10 +339,27 @@ mod tests {
 
         env::set_var("jwt_sec_env", "))");
 
-        let result = MosquittoJWTAuthPluginConfig::from_opts(opts);
+        let result = PluginConfig::from_opts(opts);
         env::remove_var("jwt_sec_env");
 
         assert_eq!(result.err().unwrap(), "invalid base64");
+    }
+
+    fn assert_same_config(
+        actual: PluginConfig,
+        expected: PluginConfig,
+    ) {
+        assert_eq!(
+            actual.validate_sub_match_username,
+            expected.validate_sub_match_username
+        );
+        assert_eq!(actual.signature_algorithm, expected.signature_algorithm);
+        assert!(actual.validation == expected.validation);
+        match (actual.secret, expected.secret) {
+            (Secret::Bytes(a), Secret::Bytes(b)) => assert_eq!(a, b),
+            (Secret::PublicKey(a), Secret::PublicKey(b)) => assert_eq!(a, b),
+            _ => panic!(),
+        };
     }
 
     #[test]
@@ -321,26 +367,22 @@ mod tests {
         env::set_var("jwt_sec_env", "AABB");
 
         let mut opts = HashMap::new();
-        opts.insert("jwt_alg", "RS256");
+        opts.insert("jwt_alg", "HS256");
         opts.insert("jwt_sec_env", "jwt_sec_env");
 
-        let result = MosquittoJWTAuthPluginConfig::from_opts(opts);
+        let result = PluginConfig::from_opts(opts);
 
-        assert_eq!(
+        assert_same_config(
             result.ok().unwrap(),
-            MosquittoJWTAuthPluginConfig {
-                secret: vec![0, 0, 0x41],
+            PluginConfig {
+                secret: Secret::Bytes(vec![0, 0, 0x41]),
+                signature_algorithm: SignatureAlgorithm::HS256,
                 validate_sub_match_username: true,
-                validation: Validation {
-                    leeway: 0,
-                    validate_exp: true,
-                    validate_nbf: false,
-                    aud: None,
-                    iss: None,
-                    sub: None,
-                    algorithms: vec![Algorithm::RS256],
+                validation: ValidationOptions {
+                    expiry: Validation::Validate(()),
+                    ..Default::default()
                 },
-            }
+            },
         );
     }
 
@@ -352,7 +394,7 @@ mod tests {
         opts.insert("jwt_alg", "HS256");
         opts.insert("jwt_sec_env", "jwt_sec_env");
 
-        let result = MosquittoJWTAuthPluginConfig::from_opts(opts);
+        let result = PluginConfig::from_opts(opts);
 
         assert_eq!(result.err().unwrap(), "environment variable not set");
     }
@@ -365,7 +407,7 @@ mod tests {
         opts.insert("jwt_alg", "HS256");
         opts.insert("jwt_sec_base64", "AAB(");
 
-        let result = MosquittoJWTAuthPluginConfig::from_opts(opts);
+        let result = PluginConfig::from_opts(opts);
 
         assert_eq!(result.err().unwrap(), "invalid base64");
     }
@@ -378,23 +420,19 @@ mod tests {
         opts.insert("jwt_alg", "RS256");
         opts.insert("jwt_sec_base64", "AABB");
 
-        let result = MosquittoJWTAuthPluginConfig::from_opts(opts);
+        let result = PluginConfig::from_opts(opts);
 
-        assert_eq!(
+        assert_same_config(
             result.ok().unwrap(),
-            MosquittoJWTAuthPluginConfig {
-                secret: vec![0, 0, 0x41],
+            PluginConfig {
+                secret: Secret::PublicKey(vec![0, 0, 0x41]),
+                signature_algorithm: SignatureAlgorithm::RS256,
                 validate_sub_match_username: true,
-                validation: Validation {
-                    leeway: 0,
-                    validate_exp: true,
-                    validate_nbf: false,
-                    aud: None,
-                    iss: None,
-                    sub: None,
-                    algorithms: vec![Algorithm::RS256],
+                validation: ValidationOptions {
+                    expiry: Validation::Validate(()),
+                    ..Default::default()
                 },
-            }
+            },
         );
     }
 
@@ -407,23 +445,19 @@ mod tests {
         opts.insert("jwt_sec_base64", "AABB");
         opts.insert("jwt_validate_exp", "false");
 
-        let result = MosquittoJWTAuthPluginConfig::from_opts(opts);
+        let result = PluginConfig::from_opts(opts);
 
-        assert_eq!(
+        assert_same_config(
             result.ok().unwrap(),
-            MosquittoJWTAuthPluginConfig {
-                secret: vec![0, 0, 0x41],
+            PluginConfig {
+                secret: Secret::PublicKey(vec![0, 0, 0x41]),
+                signature_algorithm: SignatureAlgorithm::RS256,
                 validate_sub_match_username: true,
-                validation: Validation {
-                    leeway: 0,
-                    validate_exp: false,
-                    validate_nbf: false,
-                    aud: None,
-                    iss: None,
-                    sub: None,
-                    algorithms: vec![Algorithm::RS256],
+                validation: ValidationOptions {
+                    expiry: Validation::Ignored,
+                    ..Default::default()
                 },
-            }
+            },
         );
     }
 
@@ -436,7 +470,7 @@ mod tests {
         opts.insert("jwt_sec_base64", "AABB");
         opts.insert("jwt_validate_exp", "sdfsdf");
 
-        let result = MosquittoJWTAuthPluginConfig::from_opts(opts);
+        let result = PluginConfig::from_opts(opts);
 
         assert_eq!(
             result.err().unwrap(),
@@ -449,27 +483,23 @@ mod tests {
         env::remove_var("jwt_sec_env");
 
         let mut opts = HashMap::new();
-        opts.insert("jwt_alg", "RS256");
+        opts.insert("jwt_alg", "HS256");
         opts.insert("jwt_sec_base64", "AABB");
         opts.insert("jwt_validate_sub_match_username", "false");
 
-        let result = MosquittoJWTAuthPluginConfig::from_opts(opts);
+        let result = PluginConfig::from_opts(opts);
 
-        assert_eq!(
+        assert_same_config(
             result.ok().unwrap(),
-            MosquittoJWTAuthPluginConfig {
-                secret: vec![0, 0, 0x41],
+            PluginConfig {
+                secret: Secret::Bytes(vec![0, 0, 0x41]),
+                signature_algorithm: SignatureAlgorithm::HS256,
                 validate_sub_match_username: false,
-                validation: Validation {
-                    leeway: 0,
-                    validate_exp: true,
-                    validate_nbf: false,
-                    aud: None,
-                    iss: None,
-                    sub: None,
-                    algorithms: vec![Algorithm::RS256],
+                validation: ValidationOptions {
+                    expiry: Validation::Validate(()),
+                    ..Default::default()
                 },
-            }
+            },
         );
     }
 
@@ -482,7 +512,7 @@ mod tests {
         opts.insert("jwt_sec_base64", "AABB");
         opts.insert("jwt_validate_sub_match_username", "sdfsdf");
 
-        let result = MosquittoJWTAuthPluginConfig::from_opts(opts);
+        let result = PluginConfig::from_opts(opts);
 
         assert_eq!(
             result.err().unwrap(),
@@ -498,7 +528,7 @@ mod tests {
             subs: Some(vec!["#".to_string(), "/123/55".to_string()]),
         };
 
-        let result = Permissions::from_claims(claims);
+        let result = Permissions::from_claims(&claims);
 
         assert_eq!(
             result.ok().unwrap(),
@@ -576,25 +606,21 @@ mod tests {
         opts.insert("jwt_alg", "RS256");
         opts.insert("jwt_sec_base64", "AABB");
 
-        let mut instance = MosquittoJWTAuthPluginInstance::new();
+        let mut instance = PluginInstance::new();
         let result = instance.setup(opts);
 
         assert_eq!(result.is_ok(), true);
-        assert_eq!(
+        assert_same_config(
             instance.config.unwrap(),
-            MosquittoJWTAuthPluginConfig {
-                secret: vec![0, 0, 0x41],
+            PluginConfig {
+                secret: Secret::PublicKey(vec![0, 0, 0x41]),
+                signature_algorithm: SignatureAlgorithm::RS256,
                 validate_sub_match_username: true,
-                validation: Validation {
-                    leeway: 0,
-                    validate_exp: true,
-                    validate_nbf: false,
-                    aud: None,
-                    iss: None,
-                    sub: None,
-                    algorithms: vec![Algorithm::RS256],
+                validation: ValidationOptions {
+                    expiry: Validation::Validate(()),
+                    ..Default::default()
                 },
-            }
+            },
         );
     }
 
@@ -606,7 +632,7 @@ mod tests {
         opts.insert("jwt_alg", "RS256");
         opts.insert("jwt_sec_base64", "AA((");
 
-        let mut instance = MosquittoJWTAuthPluginInstance::new();
+        let mut instance = PluginInstance::new();
         let result = instance.setup(opts);
 
         assert_eq!(result.is_ok(), false);
@@ -614,11 +640,14 @@ mod tests {
 
     #[test]
     fn test_authenticate_user_signature_mismatch() {
-        let mut instance = MosquittoJWTAuthPluginInstance::new();
-        instance.config = Some(MosquittoJWTAuthPluginConfig {
-            validation: Validation::default(),
+        let mut instance = PluginInstance::new();
+        instance.config = Some(PluginConfig {
+            validation: ValidationOptions::default(),
+            signature_algorithm: SignatureAlgorithm::HS256,
             validate_sub_match_username: true,
-            secret: base64::decode("XmThTwNsoLBlbk3cbOi5r2g1EIJNT7o7zSKc9tMUsIg").unwrap(),
+            secret: Secret::Bytes(
+                base64::decode("XmThTwNsoLBlbk3cbOi5r2g1EIJNT7o7zSKc9tMUsIg").unwrap(),
+            ),
         });
 
         let client_id = 33 as ClientID;
@@ -631,14 +660,17 @@ mod tests {
 
     #[test]
     fn test_authenticate_user_sub_username_mismatch() {
-        let mut instance = MosquittoJWTAuthPluginInstance::new();
-        instance.config = Some(MosquittoJWTAuthPluginConfig {
-            validation: Validation {
-                validate_exp: false,
-                ..Validation::default()
+        let mut instance = PluginInstance::new();
+        instance.config = Some(PluginConfig {
+            validation: ValidationOptions {
+                expiry: Validation::Ignored,
+                ..Default::default()
             },
+            signature_algorithm: SignatureAlgorithm::HS256,
             validate_sub_match_username: true,
-            secret: base64::decode("XmThTwNsoLBlbk3cbOi5r2g1EIJNT7o7zSKy9tMUsIg").unwrap(),
+            secret: Secret::Bytes(
+                base64::decode("XmThTwNsoLBlbk3cbOi5r2g1EIJNT7o7zSKy9tMUsIg").unwrap(),
+            ),
         });
 
         let client_id = 33 as ClientID;
@@ -651,14 +683,17 @@ mod tests {
 
     #[test]
     fn test_authenticate_user_username_not_set() {
-        let mut instance = MosquittoJWTAuthPluginInstance::new();
-        instance.config = Some(MosquittoJWTAuthPluginConfig {
-            validation: Validation {
-                validate_exp: false,
-                ..Validation::default()
+        let mut instance = PluginInstance::new();
+        instance.config = Some(PluginConfig {
+            validation: ValidationOptions {
+                expiry: Validation::Ignored,
+                ..Default::default()
             },
             validate_sub_match_username: true,
-            secret: base64::decode("XmThTwNsoLBlbk3cbOi5r2g1EIJNT7o7zSKy9tMUsIg").unwrap(),
+            signature_algorithm: SignatureAlgorithm::HS256,
+            secret: Secret::Bytes(
+                base64::decode("XmThTwNsoLBlbk3cbOi5r2g1EIJNT7o7zSKy9tMUsIg").unwrap(),
+            ),
         });
 
         let client_id = 33 as ClientID;
@@ -671,14 +706,17 @@ mod tests {
 
     #[test]
     fn test_authenticate_user_password_not_set() {
-        let mut instance = MosquittoJWTAuthPluginInstance::new();
-        instance.config = Some(MosquittoJWTAuthPluginConfig {
-            validation: Validation {
-                validate_exp: false,
-                ..Validation::default()
+        let mut instance = PluginInstance::new();
+        instance.config = Some(PluginConfig {
+            validation: ValidationOptions {
+                expiry: Validation::Ignored,
+                ..Default::default()
             },
             validate_sub_match_username: true,
-            secret: base64::decode("XmThTwNsoLBlbk3cbOi5r2g1EIJNT7o7zSKy9tMUsIg").unwrap(),
+            signature_algorithm: SignatureAlgorithm::HS256,
+            secret: Secret::Bytes(
+                base64::decode("XmThTwNsoLBlbk3cbOi5r2g1EIJNT7o7zSKy9tMUsIg").unwrap(),
+            ),
         });
 
         let client_id = 33 as ClientID;
@@ -691,14 +729,17 @@ mod tests {
 
     #[test]
     fn test_authenticate_user_invalid_sub_missing() {
-        let mut instance = MosquittoJWTAuthPluginInstance::new();
-        instance.config = Some(MosquittoJWTAuthPluginConfig {
-            validation: Validation {
-                validate_exp: false,
-                ..Validation::default()
+        let mut instance = PluginInstance::new();
+        instance.config = Some(PluginConfig {
+            validation: ValidationOptions {
+                expiry: Validation::Ignored,
+                ..Default::default()
             },
             validate_sub_match_username: true,
-            secret: base64::decode("XmThTwNsoLBlbk3cbOi5r2g1EIJNT7o7zSKy9tMUsIg").unwrap(),
+            signature_algorithm: SignatureAlgorithm::HS256,
+            secret: Secret::Bytes(
+                base64::decode("XmThTwNsoLBlbk3cbOi5r2g1EIJNT7o7zSKy9tMUsIg").unwrap(),
+            ),
         });
 
         let client_id = 33 as ClientID;
@@ -711,14 +752,17 @@ mod tests {
 
     #[test]
     fn test_authenticate_user_sub_valid_missing() {
-        let mut instance = MosquittoJWTAuthPluginInstance::new();
-        instance.config = Some(MosquittoJWTAuthPluginConfig {
-            validation: Validation {
-                validate_exp: false,
-                ..Validation::default()
+        let mut instance = PluginInstance::new();
+        instance.config = Some(PluginConfig {
+            validation: ValidationOptions {
+                expiry: Validation::Ignored,
+                ..Default::default()
             },
             validate_sub_match_username: false,
-            secret: base64::decode("XmThTwNsoLBlbk3cbOi5r2g1EIJNT7o7zSKy9tMUsIg").unwrap(),
+            signature_algorithm: SignatureAlgorithm::HS256,
+            secret: Secret::Bytes(
+                base64::decode("XmThTwNsoLBlbk3cbOi5r2g1EIJNT7o7zSKy9tMUsIg").unwrap(),
+            ),
         });
 
         let client_id = 33 as ClientID;
@@ -737,14 +781,17 @@ mod tests {
 
     #[test]
     fn test_authenticate_user_sub_matching() {
-        let mut instance = MosquittoJWTAuthPluginInstance::new();
-        instance.config = Some(MosquittoJWTAuthPluginConfig {
-            validation: Validation {
-                validate_exp: false,
-                ..Validation::default()
+        let mut instance = PluginInstance::new();
+        instance.config = Some(PluginConfig {
+            validation: ValidationOptions {
+                expiry: Validation::Ignored,
+                ..Default::default()
             },
             validate_sub_match_username: true,
-            secret: base64::decode("XmThTwNsoLBlbk3cbOi5r2g1EIJNT7o7zSKy9tMUsIg").unwrap(),
+            signature_algorithm: SignatureAlgorithm::HS256,
+            secret: Secret::Bytes(
+                base64::decode("XmThTwNsoLBlbk3cbOi5r2g1EIJNT7o7zSKy9tMUsIg").unwrap(),
+            ),
         });
 
         let client_id = 33 as ClientID;
@@ -763,11 +810,12 @@ mod tests {
 
     #[test]
     fn test_acl_check() {
-        let mut instance = MosquittoJWTAuthPluginInstance::new();
-        instance.config = Some(MosquittoJWTAuthPluginConfig {
-            validation: Validation::default(),
+        let mut instance = PluginInstance::new();
+        instance.config = Some(PluginConfig {
+            validation: Default::default(),
             validate_sub_match_username: true,
-            secret: Vec::new(),
+            signature_algorithm: SignatureAlgorithm::HS256,
+            secret: Secret::Bytes(vec![]),
         });
 
         let client_id0 = 33 as ClientID;

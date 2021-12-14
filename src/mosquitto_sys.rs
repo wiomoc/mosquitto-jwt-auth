@@ -1,30 +1,26 @@
 use std::os::raw::{c_char, c_int, c_long, c_void};
 
-use crate::MosquittoJWTAuthPluginInstance;
+use crate::PluginInstance;
 use std::ffi::CStr;
 
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
 pub struct mosquitto {
     _unused: [u8; 0],
 }
 
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
 pub struct mosquitto_opt {
     pub key: *mut c_char,
     pub value: *mut c_char,
 }
 
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
 pub struct mosquitto_auth_opt {
     pub _key: *mut c_char,
     pub _value: *mut c_char,
 }
 
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
 pub struct mosquitto_acl_msg {
     pub topic: *const c_char,
     pub _payload: *const c_void,
@@ -64,7 +60,7 @@ extern "C" fn mosquitto_auth_plugin_init(
     _opts: *mut mosquitto_opt,
     _opt_count: c_int,
 ) -> c_int {
-    let instance = MosquittoJWTAuthPluginInstance::new();
+    let instance = PluginInstance::new();
 
     unsafe {
         *user_data = Box::into_raw(Box::new(instance)) as *mut c_void;
@@ -81,7 +77,7 @@ extern "C" fn mosquitto_auth_plugin_cleanup(
     _opt_count: c_int,
 ) -> c_int {
     unsafe {
-        Box::from_raw(user_data as *mut MosquittoJWTAuthPluginInstance);
+        Box::from_raw(user_data as *mut PluginInstance);
     }
 
     MOSQ_ERR_SUCCESS
@@ -105,7 +101,7 @@ extern "C" fn mosquitto_auth_security_init(
         })
         .collect();
 
-    let instance = unsafe { &mut *(user_data as *mut MosquittoJWTAuthPluginInstance) };
+    let instance = unsafe { &mut *(user_data as *mut PluginInstance) };
 
     let result = instance.setup(opts);
 
@@ -140,7 +136,7 @@ extern "C" fn mosquitto_auth_acl_check(
         _ => return MOSQ_ERR_PLUGIN_DEFER,
     };
 
-    let instance = unsafe { &mut *(user_data as *mut MosquittoJWTAuthPluginInstance) };
+    let instance = unsafe { &mut *(user_data as *mut PluginInstance) };
 
     let topic = unsafe { CStr::from_ptr((*msg).topic) }.to_str().unwrap();
 
@@ -168,7 +164,7 @@ extern "C" fn mosquitto_auth_unpwd_check(
     username: *const c_char,
     password: *const c_char,
 ) -> c_int {
-    let instance = unsafe { &mut *(user_data as *mut MosquittoJWTAuthPluginInstance) };
+    let instance = unsafe { &mut *(user_data as *mut PluginInstance) };
 
     println!("{:?} {:?}", username, password);
     let username = option_cstr_from_ptr(username);
